@@ -41,7 +41,6 @@ def init_db():
             )
         """)
 
-        # Миграция: если таблица transactions уже была без колонки comment — добавляем её
         cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
         if "comment" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
@@ -91,8 +90,6 @@ def delete_category(cat_id):
         conn.execute("DELETE FROM categories WHERE id = ? AND is_default = 0", (cat_id,))
 
 def match_category(text, cats_df, cat_type):
-    """Ищет категорию нужного типа по ключевым словам.
-    Возвращает (category_id, name, matched_kw) или None."""
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
@@ -153,15 +150,8 @@ def page_operations():
 
         op_date = st.date_input("Дата", value=date.today())
         amount = st.number_input("Сумма (₽)", min_value=1, step=10, format="%d")
-        description = st.text_input(
-            "Описание (для распознавания)",
-            placeholder="например: вб кроссовки, пятёрочка"
-            if is_expense else "например: зарплата, фриланс"
-        )
-        comment = st.text_input(
-            "Комментарий (необязательно)",
-            placeholder="например: подарок сестре"
-        )
+        description = st.text_input("Категория")
+        comment = st.text_input("Комментарий")
 
         matched = None
         if description:
@@ -175,7 +165,7 @@ def page_operations():
 
         if st.button("Добавить", type="primary", use_container_width=True):
             if not description.strip():
-                st.error("Введи описание")
+                st.error("Введи категорию")
             elif not matched:
                 st.error(
                     "Не удалось определить категорию. "
@@ -224,14 +214,12 @@ def page_categories():
 
     cats_df = load_categories()
 
+    # ---------- Добавление ----------
     with st.expander("➕ Добавить категорию"):
         with st.form("add_cat", clear_on_submit=True):
-            new_name = st.text_input("Название", placeholder="например: Маркетплейс")
+            new_name = st.text_input("Название")
             new_type = st.radio("Тип", ["Расход", "Доход"], horizontal=True)
-            new_keywords = st.text_input(
-                "Ключевые слова (через запятую)",
-                placeholder="вб, озон, wildberries, ozon"
-            )
+            new_keywords = st.text_input("Ключевые слова (через запятую)")
             if st.form_submit_button("Создать"):
                 if not new_name.strip():
                     st.error("Введи название")
@@ -249,27 +237,46 @@ def page_categories():
 
     st.subheader("Существующие категории")
 
+    # ---------- Список ----------
     for _, row in cats_df.iterrows():
         emoji = "💸" if row["type"] == "expense" else "💵"
-        default_badge = " 🔒" if row["is_default"] else ""
+        is_default = bool(row["is_default"])
+        lock = " 🔒" if is_default else ""
 
-        with st.expander(f"{emoji} {row['name']}{default_badge}"):
-            new_kw = st.text_area(
-                "Ключевые слова (через запятую)",
-                value=row["keywords"],
-                key=f"kw_{row['id']}"
-            )
-            c1, c2 = st.columns([1, 1])
-            if c1.button("💾 Сохранить", key=f"save_{row['id']}"):
-                update_category_keywords(row["id"], new_kw)
-                st.success("Сохранено")
+        # «Плашка» категории: слева — раскрыть/скрыть, справа — удалить
+        head_l, head_r = st.columns([10, 1])
+        expanded_key = f"expanded_{row['id']}"
+        if expanded_key not in st.session_state:
+            st.session_state[expanded_key] = False
+
+        label = f"{emoji} {row['name']}{lock}"
+        if head_l.button(
+            ("▼ " if st.session_state[expanded_key] else "▶ ") + label,
+            key=f"toggle_{row['id']}",
+            use_container_width=True,
+        ):
+            st.session_state[expanded_key] = not st.session_state[expanded_key]
+            st.rerun()
+
+        if not is_default:
+            if head_r.button("🗑️", key=f"del_{row['id']}", help="Удалить категорию"):
+                delete_category(row["id"])
                 st.rerun()
-            if not row["is_default"]:
-                if c2.button("🗑️ Удалить", key=f"del_{row['id']}"):
-                    delete_category(row["id"])
+        else:
+            head_r.caption("🔒")
+
+        # Раскрытое содержимое
+        if st.session_state[expanded_key]:
+            with st.container(border=True):
+                new_kw = st.text_area(
+                    "Ключевые слова (через запятую)",
+                    value=row["keywords"],
+                    key=f"kw_{row['id']}"
+                )
+                if st.button("💾 Сохранить", key=f"save_{row['id']}"):
+                    update_category_keywords(row["id"], new_kw)
+                    st.success("Сохранено")
                     st.rerun()
-            else:
-                c2.caption("Системная — нельзя удалить")
 
 
 # ============================================================
