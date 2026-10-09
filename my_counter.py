@@ -3,17 +3,7 @@ import sqlite3
 import pandas as pd
 from datetime import date
 
-# ---------- Настройки ----------
 DB_PATH = "finance.db"
-
-EXPENSE_CATEGORIES = [
-    "Еда", "Транспорт", "Жильё", "Развлечения",
-    "Здоровье", "Одежда", "Подписки", "Прочее"
-]
-
-INCOME_CATEGORIES = [
-    "Зарплата", "Фриланс", "Подарки", "Проценты", "Прочее"
-]
 
 # ---------- Работа с БД ----------
 def get_conn():
@@ -22,92 +12,115 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 type TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT
+                amount INTEGER NOT NULL,
+                category_id INTEGER,
+                description TEXT,
+                FOREIGN KEY (category_id) REFERENCES categories(id)
             )
         """)
+        # Засеять категории по умолчанию, если таблица пустая
+        cur = conn.execute("SELECT COUNT(*) FROM categories")
+        if cur.fetchone()[0] == 0:
+            default_categories = [
+                # name,             type,      keywords,                                    is_default
+                ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,продукты,еда", 1),
+                ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,маркет", 1),
+                ("Транспорт",       "expense", "метро,автобус,такси,яндекс такси,бензин,заправка,каршеринг", 1),
+                ("Жильё",           "expense", "квартира,аренда,жкх,коммуналка,электричество,газ,вода", 1),
+                ("Развлечения",     "expense", "кино,театр,концерт,игры,steam,netflix", 1),
+                ("Здоровье",        "expense", "аптека,врач,клиника,стоматолог,лекарства", 1),
+                ("Одежда",          "expense", "одежда,обувь,h&m,zara,uniqlo", 1),
+                ("Подписки",        "expense", "подписка,spotify,яндекс плюс,подписки", 1),
+                ("Зарплата",        "income",  "зарплата,аванс,зп", 1),
+                ("Фриланс",         "income",  "фриланс,заказ,проект,гонорар", 1),
+                ("Подарки",         "income",  "подарок,подарили", 1),
+            ]
+            conn.executemany(
+                "INSERT INTO categories (name, type, keywords, is_default) VALUES (?, ?, ?, ?)",
+                default_categories
+            )
 
-def add_transaction(d, t, amount, category, description):
+# ---------- Категории ----------
+def load_categories():
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM categories ORDER BY type, name", conn
+        )
+
+def add_category(name, type_, keywords):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO transactions (date, type, amount, category, description) "
+            "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
+            (name.strip(), type_, keywords.strip().lower())
+        )
+
+def update_category_keywords(cat_id, keywords):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE categories SET keywords = ? WHERE id = ?",
+            (keywords.strip().lower(), cat_id)
+        )
+
+def delete_category(cat_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM categories WHERE id = ? AND is_default = 0", (cat_id,))
+
+def match_category(text, cats_df):
+    """Ищет категорию по ключевым словам. Возвращает (category_id, name, type) или None."""
+    text_lower = text.lower()
+    # Сначала проверяем более длинные ключи (точнее совпадение)
+    all_kw = []
+    for _, row in cats_df.iterrows():
+        for kw in row["keywords"].split(","):
+            kw = kw.strip()
+            if kw:
+                all_kw.append((len(kw), kw, row["id"], row["name"], row["type"]))
+    all_kw.sort(reverse=True)  # длинные вперёд
+
+    for _, kw, cid, cname, ctype in all_kw:
+        if kw in text_lower:
+            return cid, cname, ctype
+    return None
+
+# ---------- Транзакции ----------
+def add_transaction(d, amount, category_id, cat_type, description):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO transactions (date, type, amount, category_id, description) "
             "VALUES (?, ?, ?, ?, ?)",
-            (d.isoformat(), t, amount, category, description)
+            (d.isoformat(), cat_type, int(amount), category_id, description)
         )
 
 def load_transactions():
     with get_conn() as conn:
-        return pd.read_sql_query(
-            "SELECT * FROM transactions ORDER BY date DESC, id DESC",
-            conn
-        )
+        return pd.read_sql_query("""
+            SELECT t.id, t.date, t.type, t.amount,
+                   c.name AS category, t.description
+            FROM transactions t
+            LEFT JOIN categories c ON c.id = t.category_id
+            ORDER BY t.date DESC, t.id DESC
+        """, conn)
 
 # ---------- Инициализация ----------
 init_db()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
-st.title("💰 Учёт доходов и расходов")
 
-# ---------- Форма добавления ----------
-with st.sidebar:
-    st.header("➕ Добавить операцию")
+# ---------- Меню ----------
+page = st.sidebar.radio("Раздел", ["💰 Операции", "🏷️ Категории"])
+st.sidebar.divider()
 
-    op_type = st.radio("Тип", ["Расход", "Доход"], horizontal=True)
-    is_expense = op_type == "Расход"
-
-    categories = EXPENSE_CATEGORIES if is_expense else INCOME_CATEGORIES
-
-    with st.form("add_form", clear_on_submit=True):
-        op_date = st.date_input("Дата", value=date.today())
-        amount = st.number_input("Сумма", min_value=0.0, step=10.0, format="%.2f")
-        category = st.selectbox("Категория", categories)
-        description = st.text_input("Описание (необязательно)")
-        submitted = st.form_submit_button("Добавить")
-
-        if submitted:
-            if amount <= 0:
-                st.error("Сумма должна быть больше нуля")
-            else:
-                add_transaction(
-                    op_date,
-                    "expense" if is_expense else "income",
-                    amount, category, description
-                )
-                st.success(f"Добавлено: {op_type} {amount:.2f} ₽ — {category}")
-                st.rerun()
-
-# ---------- Данные ----------
-df = load_transactions()
-
-if df.empty:
-    st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
-else:
-    # ---------- Метрики ----------
-    total_income = df.loc[df["type"] == "income", "amount"].sum()
-    total_expense = df.loc[df["type"] == "expense", "amount"].sum()
-    balance = total_income - total_expense
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💵 Доходы", f"{total_income:,.2f} ₽")
-    col2.metric("💸 Расходы", f"{total_expense:,.2f} ₽")
-    col3.metric("📊 Баланс", f"{balance:,.2f} ₽",
-                delta=f"{balance:,.2f}", delta_color="normal")
-
-    st.divider()
-
-    # ---------- Таблица ----------
-    st.subheader("Все операции")
-
-    view = df.copy()
-    view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
-    view = view.rename(columns={
-        "id": "ID", "date": "Дата", "type": "Тип",
-        "amount": "Сумма", "category": "Категория",
-        "description": "Описание"
-    })
-    st.dataframe(view, use_container_width=True, hide_index=True)
+cats_df = load_categories()
