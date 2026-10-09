@@ -230,10 +230,67 @@ def page_onboarding():
 
 
 # ============================================================
+# КОМПОНЕНТ: плашка месяца
+# ============================================================
+def render_month_block(y, m, df_m):
+    """Рисует заголовок месяца с выровненными справа суммами и раскрывающийся список операций."""
+
+    key_open = f"month_open_{y}_{m}"
+    if key_open not in st.session_state:
+        st.session_state[key_open] = False  # по умолчанию все свёрнуты
+
+    m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
+    m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
+
+    # ---------- Заголовок: 3 колонки ----------
+    # [месяц]  [суммы справа]  [кнопка раскрытия]
+    c_title, c_sums, c_btn = st.columns([6, 3, 1])
+
+    with c_title:
+        st.markdown(
+            f"<div style='padding-top:8px; font-size:1.05rem; font-weight:600'>"
+            f"📅 {month_label(y, m)}</div>",
+            unsafe_allow_html=True
+        )
+
+    with c_sums:
+        st.markdown(
+            f"<div style='padding-top:8px; text-align:right; white-space:nowrap'>"
+            f"💵 +{fmt_money(m_income)} ₽&nbsp;&nbsp;&nbsp;"
+            f"💸 −{fmt_money(m_expense)} ₽"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    with c_btn:
+        icon = "▼" if st.session_state[key_open] else "▶"
+        if st.button(icon, key=f"toggle_{y}_{m}", use_container_width=True):
+            st.session_state[key_open] = not st.session_state[key_open]
+            st.rerun()
+
+    # ---------- Содержимое ----------
+    if st.session_state[key_open]:
+        with st.container(border=True):
+            view = df_m.copy()
+            view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
+            view = view.rename(columns={
+                "id": "ID", "date": "Дата", "type": "Тип",
+                "amount": "Сумма", "category": "Категория",
+                "description": "Описание", "comment": "Комментарий"
+            })
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
+    # Тонкий разделитель между месяцами
+    st.markdown(
+        "<hr style='margin:4px 0 12px 0; border:none; border-top:1px solid #e5e7eb'>",
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
 # СТРАНИЦА: ОПЕРАЦИИ
 # ============================================================
 def page_operations():
-    # Заголовок поменьше — используем markdown с h3
     st.markdown("### 💰 Учёт доходов и расходов")
 
     cats_df = load_categories()
@@ -304,7 +361,7 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
-    # ===== ТЕКУЩИЙ БАЛАНС (за всё время), без дельты =====
+    # ===== ТЕКУЩИЙ БАЛАНС =====
     initial = get_initial_balance() or 0
     total_income_all = df.loc[df["type"] == "income", "amount"].sum()
     total_expense_all = df.loc[df["type"] == "expense", "amount"].sum()
@@ -314,34 +371,14 @@ def page_operations():
 
     st.divider()
 
-    # ===== СПИСОК МЕСЯЦЕВ (без подзаголовка) =====
+    # ===== СПИСОК МЕСЯЦЕВ =====
     months = available_months(df)
     dates = pd.to_datetime(df["date"])
 
-    for idx, (y, m) in enumerate(months):
+    for y, m in months:
         mask = (dates.dt.year == y) & (dates.dt.month == m)
         df_m = df[mask]
-        m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
-        m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
-
-        # Заголовок: используем markdown-таблицу для выравнивания по левому краю
-        # (месяц | доходы | расходы) с фиксированной шириной колонок
-        label = (
-            f"📅 {month_label(y, m)}\u2003\u2003"
-            f"💵 +{fmt_money(m_income)} ₽\u2003\u2003"
-            f"💸 −{fmt_money(m_expense)} ₽"
-        )
-
-        is_first = (idx == 0)
-        with st.expander(label, expanded=is_first):
-            view = df_m.copy()
-            view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
-            view = view.rename(columns={
-                "id": "ID", "date": "Дата", "type": "Тип",
-                "amount": "Сумма", "category": "Категория",
-                "description": "Описание", "comment": "Комментарий"
-            })
-            st.dataframe(view, use_container_width=True, hide_index=True)
+        render_month_block(y, m, df_m)
 
 
 # ============================================================
