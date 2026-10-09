@@ -10,6 +10,11 @@ if os.path.isdir("/mount/src"):
 else:
     DB_PATH = "finance.db"
 
+MONTHS_RU = [
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
+]
+
 
 # ============================================================
 # РАБОТА С БД
@@ -170,6 +175,22 @@ def load_transactions():
         """, conn)
 
 
+# ---------- Вспомогательные ----------
+def month_label(year, month):
+    """Возвращает 'Октябрь 2025'."""
+    return f"{MONTHS_RU[month - 1].capitalize()} {year}"
+
+def available_months(df):
+    """Список уникальных месяцев из df, отсортированный от новых к старым.
+    Возвращает список кортежей (year, month)."""
+    if df.empty:
+        return []
+    dates = pd.to_datetime(df["date"])
+    months = dates.dt.to_period("M").dropna().unique()
+    months = sorted(months, reverse=True)
+    return [(p.year, p.month) for p in months]
+
+
 # ============================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
@@ -283,24 +304,65 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
+    # ===== ТЕКУЩИЙ БАЛАНС (за всё время) =====
     initial = get_initial_balance() or 0
-    total_income = df.loc[df["type"] == "income", "amount"].sum()
-    total_expense = df.loc[df["type"] == "expense", "amount"].sum()
-    current_balance = initial + total_income - total_expense
+    total_income_all = df.loc[df["type"] == "income", "amount"].sum()
+    total_expense_all = df.loc[df["type"] == "expense", "amount"].sum()
+    current_balance = initial + total_income_all - total_expense_all
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💵 Доходы", f"+{total_income:,} ₽".replace(",", " "))
-    col2.metric("💸 Расходы", f"−{total_expense:,} ₽".replace(",", " "))
-    col3.metric(
+    st.metric(
         "💼 Текущий баланс",
         f"{current_balance:,} ₽".replace(",", " "),
         delta=f"старт: {initial:,} ₽".replace(",", " ")
     )
 
     st.divider()
-    st.subheader("Все операции")
 
-    view = df.copy()
+    # ===== ВЫБОР МЕСЯЦА =====
+    months = available_months(df)
+    month_options = ["all"] + months
+    labels = {("all"): "Все время"}
+    for y, m in months:
+        labels[(y, m)] = month_label(y, m)
+
+    selected = st.selectbox(
+        "Месяц",
+        options=month_options,
+        format_func=lambda k: labels[k],
+        key="month_select"
+    )
+
+    # ===== ФИЛЬТРАЦИЯ ПО МЕСЯЦУ =====
+    if selected == "all":
+        df_month = df.copy()
+        period_label = "за всё время"
+    else:
+        y, m = selected
+        dates = pd.to_datetime(df["date"])
+        mask = (dates.dt.year == y) & (dates.dt.month == m)
+        df_month = df[mask].copy()
+        period_label = f"за {month_label(y, m).lower()}"
+
+    # ===== МЕТРИКИ ЗА МЕСЯЦ =====
+    month_income = df_month.loc[df_month["type"] == "income", "amount"].sum()
+    month_expense = df_month.loc[df_month["type"] == "expense", "amount"].sum()
+
+    st.markdown(f"**Доходы и расходы {period_label}**")
+
+    col1, col2 = st.columns(2)
+    col1.metric("💵 Доходы", f"+{month_income:,} ₽".replace(",", " "))
+    col2.metric("💸 Расходы", f"−{month_expense:,} ₽".replace(",", " "))
+
+    st.divider()
+
+    # ===== ТАБЛИЦА ОПЕРАЦИЙ ЗА МЕСЯЦ =====
+    st.subheader(f"Операции {period_label}")
+
+    if df_month.empty:
+        st.caption("За этот месяц операций нет.")
+        return
+
+    view = df_month.copy()
     view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
     view = view.rename(columns={
         "id": "ID", "date": "Дата", "type": "Тип",
