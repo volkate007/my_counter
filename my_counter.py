@@ -191,6 +191,60 @@ def fmt_money(x):
     return f"{int(x):,}".replace(",", " ")
 
 
+def style_signed_amount(value, tx_type):
+    """Возвращает CSS-стиль для ячейки суммы в зависимости от типа."""
+    if tx_type == "income":
+        return "color: #1a8f3a; font-weight: 600;"  # зелёный
+    else:
+        return "color: #c0392b; font-weight: 600;"  # красный
+
+
+def render_transactions_table(df_m):
+    """Рисует таблицу операций без колонки Тип, но с цветными суммами."""
+    view = df_m.copy()
+
+    # Оставляем нужные колонки
+    view = view[["id", "date", "amount", "category", "description", "comment"]].copy()
+
+    # Заменяем amount на строку со знаком
+    def signed(row):
+        val = int(row["amount"])
+        sign = "+" if row["type_orig"] == "income" else "−"
+        return f"{sign}{val:,}".replace(",", " ")
+
+    # Сохраняем оригинальный type отдельно (для стилизации)
+    view["type_orig"] = df_m["type"].values
+
+    view["amount_str"] = view.apply(signed, axis=1)
+
+    # Переименовываем
+    view = view.rename(columns={
+        "id": "ID", "date": "Дата", "amount_str": "Сумма",
+        "category": "Категория", "description": "Описание",
+        "comment": "Комментарий"
+    })
+
+    # Упорядочиваем колонки
+    view = view[["ID", "Дата", "Сумма", "Категория", "Описание", "Комментарий"]]
+
+    # Стилизуем колонку "Сумма" — цвет зависит от типа
+    types = df_m["type"].tolist()
+    sum_col_idx = view.columns.get_loc("Сумма")
+
+    def style_row(row):
+        styles = [""] * len(row)
+        # Определяем тип для строки по позиции
+        idx = view.index.get_loc(row.name)
+        t = types[idx]
+        color = "#1a8f3a" if t == "income" else "#c0392b"
+        styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
+        return styles
+
+    styled = view.style.apply(style_row, axis=1)
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 # ============================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
@@ -201,15 +255,12 @@ st.set_page_config(page_title="Мои финансы", page_icon="💰", layout=
 # ---------- Кастомный CSS ----------
 st.markdown("""
 <style>
-    /* Заголовки expander'ов — 20px */
     details > summary {
         font-size: 20px !important;
     }
     details > summary p {
         font-size: 20px !important;
     }
-
-    /* Компактная сетка для метрик внутри блока месяца */
     .metrics-row {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -362,13 +413,11 @@ def page_operations():
         m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
         m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
-        # В заголовке — только месяц
         label = f"📅 {month_label(y, m)}"
 
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
-            # Доходы и расходы за месяц — жёстко две колонки через CSS Grid
-            # (st.columns схлопывается в одну на мобильных, grid — нет)
+            # Доходы и расходы за месяц — компактно
             st.markdown(
                 f"""
                 <div class="metrics-row">
@@ -387,15 +436,8 @@ def page_operations():
 
             st.divider()
 
-            # Таблица операций
-            view = df_m.copy()
-            view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
-            view = view.rename(columns={
-                "id": "ID", "date": "Дата", "type": "Тип",
-                "amount": "Сумма", "category": "Категория",
-                "description": "Описание", "comment": "Комментарий"
-            })
-            st.dataframe(view, use_container_width=True, hide_index=True)
+            # Таблица операций — без колонки Тип, но с цветными суммами
+            render_transactions_table(df_m)
 
 
 # ============================================================
