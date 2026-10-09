@@ -198,6 +198,19 @@ init_db()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
+# ---------- Кастомный CSS ----------
+# Увеличиваем заголовки expander'ов (плашки месяцев и категорий) до 20px
+st.markdown("""
+<style>
+    details > summary {
+        font-size: 20px !important;
+    }
+    details > summary p {
+        font-size: 20px !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ============================================================
 # ЭКРАН ПЕРВОГО ЗАПУСКА
@@ -323,7 +336,6 @@ def page_operations():
         m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
         m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
-        # Заголовок expander: месяц + суммы, отступ как был
         label = (
             f"📅 {month_label(y, m)}   ·   "
             f"💵 +{fmt_money(m_income)} ₽   ·   "
