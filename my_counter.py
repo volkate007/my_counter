@@ -325,8 +325,8 @@ def page_operations():
 
         # Заголовок expander: месяц + суммы, отступ как был
         label = (
-            f"📅 {month_label(y, m)}              "
-            f"                    💵 +{fmt_money(m_income)} ₽       "
+            f"📅 {month_label(y, m)}   ·   "
+            f"💵 +{fmt_money(m_income)} ₽   ·   "
             f"💸 −{fmt_money(m_expense)} ₽"
         )
 
