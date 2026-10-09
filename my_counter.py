@@ -5,18 +5,17 @@ import os
 from datetime import date
 
 # ---------- Путь к БД ----------
-# На Streamlit Cloud рабочая папка read-only, пишем в /tmp
-# Локально пишем рядом с файлом приложения
 if os.path.isdir("/mount/src"):
     DB_PATH = "/tmp/finance.db"
 else:
     DB_PATH = "finance.db"
 
 
-# ---------- Работа с БД ----------
+# ============================================================
+# РАБОТА С БД
+# ============================================================
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return conn
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
     with get_conn() as conn:
@@ -37,9 +36,16 @@ def init_db():
                 amount INTEGER NOT NULL,
                 category_id INTEGER,
                 description TEXT,
+                comment TEXT,
                 FOREIGN KEY (category_id) REFERENCES categories(id)
             )
         """)
+
+        # Миграция: если таблица transactions уже была без колонки comment — добавляем её
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+        if "comment" not in cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
+
         cur = conn.execute("SELECT COUNT(*) FROM categories")
         if cur.fetchone()[0] == 0:
             default_categories = [
@@ -103,41 +109,40 @@ def match_category(text, cats_df, cat_type):
 
 
 # ---------- Транзакции ----------
-def add_transaction(d, amount, category_id, cat_type, description):
+def add_transaction(d, amount, category_id, cat_type, description, comment):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO transactions (date, type, amount, category_id, description) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (d.isoformat(), cat_type, int(amount), category_id, description)
+            "INSERT INTO transactions (date, type, amount, category_id, description, comment) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (d.isoformat(), cat_type, int(amount), category_id, description, comment)
         )
 
 def load_transactions():
     with get_conn() as conn:
         return pd.read_sql_query("""
             SELECT t.id, t.date, t.type, t.amount,
-                   c.name AS category, t.description
+                   c.name AS category, t.description, t.comment
             FROM transactions t
             LEFT JOIN categories c ON c.id = t.category_id
             ORDER BY t.date DESC, t.id DESC
         """, conn)
 
 
-# ---------- Инициализация ----------
+# ============================================================
+# ИНИЦИАЛИЗАЦИЯ
+# ============================================================
 init_db()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-page = st.sidebar.radio("Раздел", ["💰 Операции", "🏷️ Категории"])
-st.sidebar.divider()
-
-cats_df = load_categories()
-
 
 # ============================================================
-# ЭКРАН: ОПЕРАЦИИ
+# СТРАНИЦА: ОПЕРАЦИИ
 # ============================================================
-if page == "💰 Операции":
+def page_operations():
     st.title("💰 Учёт доходов и расходов")
+
+    cats_df = load_categories()
 
     with st.sidebar:
         op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
@@ -149,9 +154,13 @@ if page == "💰 Операции":
         op_date = st.date_input("Дата", value=date.today())
         amount = st.number_input("Сумма (₽)", min_value=1, step=10, format="%d")
         description = st.text_input(
-            "На что потрачено" if is_expense else "Как заработано",
+            "Описание (для распознавания)",
             placeholder="например: вб кроссовки, пятёрочка"
             if is_expense else "например: зарплата, фриланс"
+        )
+        comment = st.text_input(
+            "Комментарий (необязательно)",
+            placeholder="например: подарок сестре"
         )
 
         matched = None
@@ -174,7 +183,7 @@ if page == "💰 Операции":
                 )
             else:
                 cid, cname, _ = matched
-                add_transaction(op_date, amount, cid, cat_type, description)
+                add_transaction(op_date, amount, cid, cat_type, description, comment)
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
 
@@ -182,35 +191,38 @@ if page == "💰 Операции":
 
     if df.empty:
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
-    else:
-        total_income = df.loc[df["type"] == "income", "amount"].sum()
-        total_expense = df.loc[df["type"] == "expense", "amount"].sum()
-        balance = total_income - total_expense
+        return
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("💵 Доходы", f"{total_income:,} ₽".replace(",", " "))
-        col2.metric("💸 Расходы", f"{total_expense:,} ₽".replace(",", " "))
-        col3.metric("📊 Баланс", f"{balance:,} ₽".replace(",", " "))
+    total_income = df.loc[df["type"] == "income", "amount"].sum()
+    total_expense = df.loc[df["type"] == "expense", "amount"].sum()
+    balance = total_income - total_expense
 
-        st.divider()
-        st.subheader("Все операции")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💵 Доходы", f"{total_income:,} ₽".replace(",", " "))
+    col2.metric("💸 Расходы", f"{total_expense:,} ₽".replace(",", " "))
+    col3.metric("📊 Баланс", f"{balance:,} ₽".replace(",", " "))
 
-        view = df.copy()
-        view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
-        view = view.rename(columns={
-            "id": "ID", "date": "Дата", "type": "Тип",
-            "amount": "Сумма", "category": "Категория",
-            "description": "Описание"
-        })
-        st.dataframe(view, use_container_width=True, hide_index=True)
+    st.divider()
+    st.subheader("Все операции")
+
+    view = df.copy()
+    view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
+    view = view.rename(columns={
+        "id": "ID", "date": "Дата", "type": "Тип",
+        "amount": "Сумма", "category": "Категория",
+        "description": "Описание", "comment": "Комментарий"
+    })
+    st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 # ============================================================
-# ЭКРАН: КАТЕГОРИИ
+# СТРАНИЦА: КАТЕГОРИИ
 # ============================================================
-elif page == "🏷️ Категории":
+def page_categories():
     st.title("🏷️ Категории и ключевые слова")
     st.caption("Через запятую. Если пользователь введёт одно из этих слов — операция попадёт в эту категорию.")
+
+    cats_df = load_categories()
 
     with st.expander("➕ Добавить категорию"):
         with st.form("add_cat", clear_on_submit=True):
@@ -258,3 +270,15 @@ elif page == "🏷️ Категории":
                     st.rerun()
             else:
                 c2.caption("Системная — нельзя удалить")
+
+
+# ============================================================
+# НАВИГАЦИЯ (МЕНЮ)
+# ============================================================
+pages = [
+    st.Page(page_operations, title="Операции", icon="💰", default=True),
+    st.Page(page_categories, title="Категории", icon="🏷️"),
+]
+
+nav = st.navigation(pages, position="sidebar")
+nav.run()
