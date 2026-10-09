@@ -323,13 +323,10 @@ def page_operations():
         m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
         m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
-        # Заголовок expander: месяц + воздух + суммы
-        # \u2003 — em-space (широкий пробел), даёт воздух между блоками
+        # Заголовок expander: месяц + суммы, отступ как был
         label = (
-            f"📅 {month_label(y, m)}"
-            f"\u2003\u2003\u2003\u2003\u2003\u2003\u2003\u2003"
-            f"💵 +{fmt_money(m_income)} ₽"
-            f"\u2003\u2003\u2003"
+            f"📅 {month_label(y, m)}   ·   "
+            f"💵 +{fmt_money(m_income)} ₽   ·   "
             f"💸 −{fmt_money(m_expense)} ₽"
         )
 
