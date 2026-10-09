@@ -286,14 +286,12 @@ def page_operations():
     initial = get_initial_balance() or 0
     total_income = df.loc[df["type"] == "income", "amount"].sum()
     total_expense = df.loc[df["type"] == "expense", "amount"].sum()
-    change = total_income - total_expense
-    current_balance = initial + change
+    current_balance = initial + total_income - total_expense
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("💵 Доходы", f"{total_income:,} ₽".replace(",", " "))
-    col2.metric("💸 Расходы", f"{total_expense:,} ₽".replace(",", " "))
-    col3.metric("📈 Изменение", f"{change:,} ₽".replace(",", " "))
-    col4.metric(
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💵 Доходы", f"+{total_income:,} ₽".replace(",", " "))
+    col2.metric("💸 Расходы", f"−{total_expense:,} ₽".replace(",", " "))
+    col3.metric(
         "💼 Текущий баланс",
         f"{current_balance:,} ₽".replace(",", " "),
         delta=f"старт: {initial:,} ₽".replace(",", " ")
