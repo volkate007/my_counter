@@ -198,14 +198,24 @@ init_db()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# ---------- Кастомный CSS: заголовки expander'ов 20px ----------
+# ---------- Кастомный CSS ----------
 st.markdown("""
 <style>
+    /* Заголовки expander'ов — 20px */
     details > summary {
         font-size: 20px !important;
     }
     details > summary p {
         font-size: 20px !important;
+    }
+    /* Компактные метрики внутри блока месяца */
+    .small-metric {
+        font-size: 16px;
+        color: #555;
+    }
+    .small-metric b {
+        font-size: 18px;
+        color: #111;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -340,10 +350,18 @@ def page_operations():
 
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
-            # Доходы и расходы за месяц — внутри блока
+            # Доходы и расходы за месяц — компактно, в две колонки
             c1, c2 = st.columns(2)
-            c1.metric("💵 Доходы", f"+{fmt_money(m_income)} ₽")
-            c2.metric("💸 Расходы", f"−{fmt_money(m_expense)} ₽")
+            c1.markdown(
+                f"<div class='small-metric'>💵 Доходы: "
+                f"<b>+{fmt_money(m_income)} ₽</b></div>",
+                unsafe_allow_html=True
+            )
+            c2.markdown(
+                f"<div class='small-metric'>💸 Расходы: "
+                f"<b>−{fmt_money(m_expense)} ₽</b></div>",
+                unsafe_allow_html=True
+            )
 
             st.divider()
 
