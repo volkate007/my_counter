@@ -24,8 +24,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 type TEXT NOT NULL,
-                keywords TEXT NOT NULL DEFAULT '',
-                is_default INTEGER NOT NULL DEFAULT 0
+                keywords TEXT NOT NULL DEFAULT ''
             )
         """)
         conn.execute("""
@@ -41,27 +40,29 @@ def init_db():
             )
         """)
 
+        # Миграция: добавить comment, если её ещё нет
         cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
         if "comment" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
 
+        # Засеять дефолтные категории, если таблица пуста
         cur = conn.execute("SELECT COUNT(*) FROM categories")
         if cur.fetchone()[0] == 0:
             default_categories = [
-                ("Продукты",    "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,продукты,еда", 1),
-                ("Маркетплейс", "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,маркет", 1),
-                ("Транспорт",   "expense", "метро,автобус,такси,яндекс такси,бензин,заправка,каршеринг", 1),
-                ("Жильё",       "expense", "квартира,аренда,жкх,коммуналка,электричество,газ,вода", 1),
-                ("Развлечения", "expense", "кино,театр,концерт,игры,steam,netflix", 1),
-                ("Здоровье",    "expense", "аптека,врач,клиника,стоматолог,лекарства", 1),
-                ("Одежда",      "expense", "одежда,обувь,h&m,zara,uniqlo", 1),
-                ("Подписки",    "expense", "подписка,spotify,яндекс плюс,подписки", 1),
-                ("Зарплата",    "income",  "зарплата,аванс,зп", 1),
-                ("Фриланс",     "income",  "фриланс,заказ,проект,гонорар", 1),
-                ("Подарки",     "income",  "подарок,подарили", 1),
+                ("Продукты",    "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,продукты,еда"),
+                ("Маркетплейс", "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,маркет"),
+                ("Транспорт",   "expense", "метро,автобус,такси,яндекс такси,бензин,заправка,каршеринг"),
+                ("Жильё",       "expense", "квартира,аренда,жкх,коммуналка,электричество,газ,вода"),
+                ("Развлечения", "expense", "кино,театр,концерт,игры,steam,netflix"),
+                ("Здоровье",    "expense", "аптека,врач,клиника,стоматолог,лекарства"),
+                ("Одежда",      "expense", "одежда,обувь,h&m,zara,uniqlo"),
+                ("Подписки",    "expense", "подписка,spotify,яндекс плюс,подписки"),
+                ("Зарплата",    "income",  "зарплата,аванс,зп"),
+                ("Фриланс",     "income",  "фриланс,заказ,проект,гонорар"),
+                ("Подарки",     "income",  "подарок,подарили"),
             ]
             conn.executemany(
-                "INSERT INTO categories (name, type, keywords, is_default) VALUES (?, ?, ?, ?)",
+                "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
                 default_categories
             )
 
@@ -71,29 +72,54 @@ def load_categories():
     with get_conn() as conn:
         return pd.read_sql_query("SELECT * FROM categories ORDER BY type, name", conn)
 
-def add_category(name, type_, keywords):
+def add_category(name, type_, keywords=""):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
             (name.strip(), type_, keywords.strip().lower())
         )
 
-def update_category_keywords(cat_id, keywords):
+def delete_category(cat_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+
+def get_keywords(cat_id):
+    """Возвращает список ключевых слов категории."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT keywords FROM categories WHERE id = ?", (cat_id,)
+        ).fetchone()
+    if not row or not row[0]:
+        return []
+    return [kw.strip() for kw in row[0].split(",") if kw.strip()]
+
+def save_keywords(cat_id, keywords_list):
+    """Сохраняет список ключевых слов как строку через запятую."""
+    joined = ",".join(k.strip().lower() for k in keywords_list if k.strip())
     with get_conn() as conn:
         conn.execute(
             "UPDATE categories SET keywords = ? WHERE id = ?",
-            (keywords.strip().lower(), cat_id)
+            (joined, cat_id)
         )
 
-def delete_category(cat_id):
-    with get_conn() as conn:
-        conn.execute("DELETE FROM categories WHERE id = ? AND is_default = 0", (cat_id,))
+def add_keyword(cat_id, kw):
+    kws = get_keywords(cat_id)
+    kw = kw.strip().lower()
+    if kw and kw not in kws:
+        kws.append(kw)
+        save_keywords(cat_id, kws)
+
+def remove_keyword(cat_id, kw):
+    kws = get_keywords(cat_id)
+    if kw in kws:
+        kws.remove(kw)
+        save_keywords(cat_id, kws)
 
 def match_category(text, cats_df, cat_type):
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
-        for kw in row["keywords"].split(","):
+        for kw in str(row["keywords"]).split(","):
             kw = kw.strip()
             if kw:
                 all_kw.append((len(kw), kw, row["id"], row["name"]))
@@ -210,16 +236,15 @@ def page_operations():
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
-    st.caption("Через запятую. Если пользователь введёт одно из этих слов — операция попадёт в эту категорию.")
+    st.caption("Если в операции встретится одно из ключевых слов — она попадёт в эту категорию.")
 
     cats_df = load_categories()
 
-    # ---------- Добавление ----------
+    # ---------- Добавление категории ----------
     with st.expander("➕ Добавить категорию"):
         with st.form("add_cat", clear_on_submit=True):
             new_name = st.text_input("Название")
             new_type = st.radio("Тип", ["Расход", "Доход"], horizontal=True)
-            new_keywords = st.text_input("Ключевые слова (через запятую)")
             if st.form_submit_button("Создать"):
                 if not new_name.strip():
                     st.error("Введи название")
@@ -228,7 +253,7 @@ def page_categories():
                         add_category(
                             new_name,
                             "expense" if new_type == "Расход" else "income",
-                            new_keywords
+                            ""
                         )
                         st.success(f"Категория «{new_name}» добавлена")
                         st.rerun()
@@ -237,31 +262,49 @@ def page_categories():
 
     st.subheader("Существующие категории")
 
-    # ---------- Список ----------
+    # ---------- Список категорий ----------
     for _, row in cats_df.iterrows():
         emoji = "💸" if row["type"] == "expense" else "💵"
-        is_default = bool(row["is_default"])
-        lock = " 🔒" if is_default else ""
+        cat_id = row["id"]
+        kws = get_keywords(cat_id)
 
-        with st.expander(f"{emoji} {row['name']}{lock}"):
-            new_kw = st.text_area(
-                "Ключевые слова (через запятую)",
-                value=row["keywords"],
-                key=f"kw_{row['id']}"
-            )
+        with st.expander(f"{emoji} {row['name']}  ·  {len(kws)} слов"):
+            # ---- Ключевые слова ----
+            st.markdown("**Ключевые слова**")
 
-            c1, c2 = st.columns([1, 1])
-            if c1.button("💾 Сохранить", key=f"save_{row['id']}", use_container_width=True):
-                update_category_keywords(row["id"], new_kw)
-                st.success("Сохранено")
-                st.rerun()
-
-            if not is_default:
-                if c2.button("🗑️ Удалить", key=f"del_{row['id']}", use_container_width=True):
-                    delete_category(row["id"])
-                    st.rerun()
+            if not kws:
+                st.caption("Пока нет ключевых слов — добавь ниже.")
             else:
-                c2.caption("Системная — нельзя удалить")
+                for kw in kws:
+                    c1, c2 = st.columns([10, 1])
+                    c1.markdown(
+                        f"<div style='padding:4px 10px; background:#f0f2f6; "
+                        f"border-radius:8px; display:inline-block'>{kw}</div>",
+                        unsafe_allow_html=True
+                    )
+                    if c2.button("🗑️", key=f"delkw_{cat_id}_{kw}", help="Удалить слово"):
+                        remove_keyword(cat_id, kw)
+                        st.rerun()
+
+            # ---- Добавить слово ----
+            with st.form(f"addkw_{cat_id}", clear_on_submit=True):
+                c1, c2 = st.columns([4, 1])
+                new_kw = c1.text_input(
+                    "Новое ключевое слово",
+                    label_visibility="collapsed",
+                    key=f"newkw_{cat_id}"
+                )
+                if c2.form_submit_button("➕ Добавить", use_container_width=True):
+                    if new_kw.strip():
+                        add_keyword(cat_id, new_kw)
+                        st.rerun()
+
+            st.divider()
+
+            # ---- Удалить категорию ----
+            if st.button("🗑️ Удалить категорию", key=f"delcat_{cat_id}"):
+                delete_category(cat_id)
+                st.rerun()
 
 
 # ============================================================
