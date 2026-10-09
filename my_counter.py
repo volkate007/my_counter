@@ -193,16 +193,19 @@ def page_onboarding():
     with st.form("onboarding"):
         initial = st.number_input(
             "Начальная сумма (₽)",
-            min_value=0,
+            min_value=1,
             step=1000,
             format="%d",
-            value=0
+            value=None
         )
         submitted = st.form_submit_button("Начать учёт", type="primary")
 
         if submitted:
-            set_initial_balance(initial)
-            st.rerun()
+            if initial is None:
+                st.error("Введи начальную сумму")
+            else:
+                set_initial_balance(initial)
+                st.rerun()
 
 
 # ============================================================
@@ -214,7 +217,6 @@ def page_operations():
     cats_df = load_categories()
 
     with st.sidebar:
-        # ---- Форма добавления ----
         op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
         is_expense = op_type == "Расход"
         cat_type = "expense" if is_expense else "income"
@@ -222,7 +224,13 @@ def page_operations():
         st.header(f"➕ Добавить {'расход' if is_expense else 'доход'}")
 
         op_date = st.date_input("Дата", value=date.today())
-        amount = st.number_input("Сумма (₽)", min_value=1, step=10, format="%d")
+        amount = st.number_input(
+            "Сумма (₽)",
+            min_value=1,
+            step=10,
+            format="%d",
+            value=None
+        )
         description = st.text_input("Категория")
         comment = st.text_input("Комментарий")
 
@@ -237,7 +245,9 @@ def page_operations():
             st.warning("⚠️ Категория не распознана")
 
         if st.button("Добавить", type="primary", use_container_width=True):
-            if not description.strip():
+            if amount is None:
+                st.error("Введи сумму")
+            elif not description.strip():
                 st.error("Введи категорию")
             elif not matched:
                 st.error(
@@ -273,7 +283,6 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
-    # ---- Метрики ----
     initial = get_initial_balance() or 0
     total_income = df.loc[df["type"] == "income", "amount"].sum()
     total_expense = df.loc[df["type"] == "expense", "amount"].sum()
@@ -377,7 +386,6 @@ def page_categories():
 # ============================================================
 # НАВИГАЦИЯ (МЕНЮ)
 # ============================================================
-# Показываем онбординг, пока не задан начальный баланс
 if get_initial_balance() is None:
     page_onboarding()
 else:
