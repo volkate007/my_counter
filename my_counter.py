@@ -243,40 +243,25 @@ def page_categories():
         is_default = bool(row["is_default"])
         lock = " 🔒" if is_default else ""
 
-        # «Плашка» категории: слева — раскрыть/скрыть, справа — удалить
-        head_l, head_r = st.columns([10, 1])
-        expanded_key = f"expanded_{row['id']}"
-        if expanded_key not in st.session_state:
-            st.session_state[expanded_key] = False
+        with st.expander(f"{emoji} {row['name']}{lock}"):
+            new_kw = st.text_area(
+                "Ключевые слова (через запятую)",
+                value=row["keywords"],
+                key=f"kw_{row['id']}"
+            )
 
-        label = f"{emoji} {row['name']}{lock}"
-        if head_l.button(
-            ("▼ " if st.session_state[expanded_key] else "▶ ") + label,
-            key=f"toggle_{row['id']}",
-            use_container_width=True,
-        ):
-            st.session_state[expanded_key] = not st.session_state[expanded_key]
-            st.rerun()
-
-        if not is_default:
-            if head_r.button("🗑️", key=f"del_{row['id']}", help="Удалить категорию"):
-                delete_category(row["id"])
+            c1, c2 = st.columns([1, 1])
+            if c1.button("💾 Сохранить", key=f"save_{row['id']}", use_container_width=True):
+                update_category_keywords(row["id"], new_kw)
+                st.success("Сохранено")
                 st.rerun()
-        else:
-            head_r.caption("🔒")
 
-        # Раскрытое содержимое
-        if st.session_state[expanded_key]:
-            with st.container(border=True):
-                new_kw = st.text_area(
-                    "Ключевые слова (через запятую)",
-                    value=row["keywords"],
-                    key=f"kw_{row['id']}"
-                )
-                if st.button("💾 Сохранить", key=f"save_{row['id']}"):
-                    update_category_keywords(row["id"], new_kw)
-                    st.success("Сохранено")
+            if not is_default:
+                if c2.button("🗑️ Удалить", key=f"del_{row['id']}", use_container_width=True):
+                    delete_category(row["id"])
                     st.rerun()
+            else:
+                c2.caption("Системная — нельзя удалить")
 
 
 # ============================================================
