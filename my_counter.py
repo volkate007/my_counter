@@ -177,18 +177,16 @@ def load_transactions():
 
 # ---------- Вспомогательные ----------
 def month_label(year, month):
-    """Возвращает 'Октябрь 2025'."""
     return f"{MONTHS_RU[month - 1].capitalize()} {year}"
 
 def available_months(df):
-    """Список уникальных месяцев из df, отсортированный от новых к старым.
-    Возвращает список кортежей (year, month)."""
+    """Список уникальных месяцев (year, month) от новых к старым."""
     if df.empty:
         return []
     dates = pd.to_datetime(df["date"])
-    months = dates.dt.to_period("M").dropna().unique()
-    months = sorted(months, reverse=True)
-    return [(p.year, p.month) for p in months]
+    periods = dates.dt.to_period("M").dropna().unique()
+    periods = sorted(periods, reverse=True)
+    return [(p.year, p.month) for p in periods]
 
 
 # ============================================================
@@ -317,59 +315,35 @@ def page_operations():
     )
 
     st.divider()
+    st.subheader("📅 По месяцам")
 
-    # ===== ВЫБОР МЕСЯЦА =====
+    # ===== СПИСОК МЕСЯЦЕВ =====
     months = available_months(df)
-    month_options = ["all"] + months
-    labels = {("all"): "Все время"}
-    for y, m in months:
-        labels[(y, m)] = month_label(y, m)
+    dates = pd.to_datetime(df["date"])
 
-    selected = st.selectbox(
-        "Месяц",
-        options=month_options,
-        format_func=lambda k: labels[k],
-        key="month_select"
-    )
-
-    # ===== ФИЛЬТРАЦИЯ ПО МЕСЯЦУ =====
-    if selected == "all":
-        df_month = df.copy()
-        period_label = "за всё время"
-    else:
-        y, m = selected
-        dates = pd.to_datetime(df["date"])
+    for idx, (y, m) in enumerate(months):
         mask = (dates.dt.year == y) & (dates.dt.month == m)
-        df_month = df[mask].copy()
-        period_label = f"за {month_label(y, m).lower()}"
+        df_m = df[mask]
+        m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
+        m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
-    # ===== МЕТРИКИ ЗА МЕСЯЦ =====
-    month_income = df_month.loc[df_month["type"] == "income", "amount"].sum()
-    month_expense = df_month.loc[df_month["type"] == "expense", "amount"].sum()
+        # Заголовок плашки: месяц + доходы / расходы
+        label = (
+            f"📅 {month_label(y, m)}   ·   "
+            f"💵 +{m_income:,} ₽   ·   💸 −{m_expense:,} ₽".replace(",", " ")
+        )
 
-    st.markdown(f"**Доходы и расходы {period_label}**")
-
-    col1, col2 = st.columns(2)
-    col1.metric("💵 Доходы", f"+{month_income:,} ₽".replace(",", " "))
-    col2.metric("💸 Расходы", f"−{month_expense:,} ₽".replace(",", " "))
-
-    st.divider()
-
-    # ===== ТАБЛИЦА ОПЕРАЦИЙ ЗА МЕСЯЦ =====
-    st.subheader(f"Операции {period_label}")
-
-    if df_month.empty:
-        st.caption("За этот месяц операций нет.")
-        return
-
-    view = df_month.copy()
-    view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
-    view = view.rename(columns={
-        "id": "ID", "date": "Дата", "type": "Тип",
-        "amount": "Сумма", "category": "Категория",
-        "description": "Описание", "comment": "Комментарий"
-    })
-    st.dataframe(view, use_container_width=True, hide_index=True)
+        # Самый свежий месяц — раскрыт по умолчанию
+        is_first = (idx == 0)
+        with st.expander(label, expanded=is_first):
+            view = df_m.copy()
+            view["type"] = view["type"].map({"income": "Доход", "expense": "Расход"})
+            view = view.rename(columns={
+                "id": "ID", "date": "Дата", "type": "Тип",
+                "amount": "Сумма", "category": "Категория",
+                "description": "Описание", "comment": "Комментарий"
+            })
+            st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 # ============================================================
