@@ -208,13 +208,15 @@ st.markdown("""
     details > summary p {
         font-size: 20px !important;
     }
-    /* Компактные метрики внутри блока месяца */
-    .small-metric {
-        font-size: 16px;
-        color: #555;
+    /* Уменьшенные метрики внутри блока месяца */
+    .mini-metric-label {
+        font-size: 14px;
+        color: #666;
+        margin-bottom: 2px;
     }
-    .small-metric b {
-        font-size: 18px;
+    .mini-metric-value {
+        font-size: 20px;
+        font-weight: 600;
         color: #111;
     }
 </style>
@@ -350,16 +352,16 @@ def page_operations():
 
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
-            # Доходы и расходы за месяц — компактно, в две колонки
+            # Доходы и расходы за месяц — подпись сверху, цифра снизу
             c1, c2 = st.columns(2)
             c1.markdown(
-                f"<div class='small-metric'>💵 Доходы: "
-                f"<b>+{fmt_money(m_income)} ₽</b></div>",
+                f"<div class='mini-metric-label'>💵 Доходы</div>"
+                f"<div class='mini-metric-value'>+{fmt_money(m_income)} ₽</div>",
                 unsafe_allow_html=True
             )
             c2.markdown(
-                f"<div class='small-metric'>💸 Расходы: "
-                f"<b>−{fmt_money(m_expense)} ₽</b></div>",
+                f"<div class='mini-metric-label'>💸 Расходы</div>"
+                f"<div class='mini-metric-value'>−{fmt_money(m_expense)} ₽</div>",
                 unsafe_allow_html=True
             )
 
