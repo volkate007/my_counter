@@ -180,13 +180,15 @@ def month_label(year, month):
     return f"{MONTHS_RU[month - 1].capitalize()} {year}"
 
 def available_months(df):
-    """Список уникальных месяцев (year, month) от новых к старым."""
     if df.empty:
         return []
     dates = pd.to_datetime(df["date"])
     periods = dates.dt.to_period("M").dropna().unique()
     periods = sorted(periods, reverse=True)
     return [(p.year, p.month) for p in periods]
+
+def fmt_money(x):
+    return f"{int(x):,}".replace(",", " ")
 
 
 # ============================================================
@@ -231,7 +233,8 @@ def page_onboarding():
 # СТРАНИЦА: ОПЕРАЦИИ
 # ============================================================
 def page_operations():
-    st.title("💰 Учёт доходов и расходов")
+    # Заголовок поменьше — используем markdown с h3
+    st.markdown("### 💰 Учёт доходов и расходов")
 
     cats_df = load_categories()
 
@@ -279,7 +282,6 @@ def page_operations():
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
 
-        # ---- Настройки баланса ----
         st.divider()
         with st.expander("⚙️ Начальный баланс"):
             current_initial = get_initial_balance() or 0
@@ -302,22 +304,17 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
-    # ===== ТЕКУЩИЙ БАЛАНС (за всё время) =====
+    # ===== ТЕКУЩИЙ БАЛАНС (за всё время), без дельты =====
     initial = get_initial_balance() or 0
     total_income_all = df.loc[df["type"] == "income", "amount"].sum()
     total_expense_all = df.loc[df["type"] == "expense", "amount"].sum()
     current_balance = initial + total_income_all - total_expense_all
 
-    st.metric(
-        "💼 Текущий баланс",
-        f"{current_balance:,} ₽".replace(",", " "),
-        delta=f"старт: {initial:,} ₽".replace(",", " ")
-    )
+    st.metric("💼 Текущий баланс", f"{fmt_money(current_balance)} ₽")
 
     st.divider()
-    st.subheader("📅 По месяцам")
 
-    # ===== СПИСОК МЕСЯЦЕВ =====
+    # ===== СПИСОК МЕСЯЦЕВ (без подзаголовка) =====
     months = available_months(df)
     dates = pd.to_datetime(df["date"])
 
@@ -327,13 +324,14 @@ def page_operations():
         m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
         m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
-        # Заголовок плашки: месяц + доходы / расходы
+        # Заголовок: используем markdown-таблицу для выравнивания по левому краю
+        # (месяц | доходы | расходы) с фиксированной шириной колонок
         label = (
-            f"📅 {month_label(y, m)}   ·   "
-            f"💵 +{m_income:,} ₽   ·   💸 −{m_expense:,} ₽".replace(",", " ")
+            f"📅 {month_label(y, m)}\u2003\u2003"
+            f"💵 +{fmt_money(m_income)} ₽\u2003\u2003"
+            f"💸 −{fmt_money(m_expense)} ₽"
         )
 
-        # Самый свежий месяц — раскрыт по умолчанию
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
             view = df_m.copy()
