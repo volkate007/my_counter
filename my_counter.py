@@ -1,13 +1,22 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import os
 from datetime import date
 
-DB_PATH = "finance.db"
+# ---------- Путь к БД ----------
+# На Streamlit Cloud рабочая папка read-only, пишем в /tmp
+# Локально пишем рядом с файлом приложения
+if os.path.isdir("/mount/src"):
+    DB_PATH = "/tmp/finance.db"
+else:
+    DB_PATH = "finance.db"
+
 
 # ---------- Работа с БД ----------
 def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
 
 def init_db():
     with get_conn() as conn:
@@ -51,6 +60,7 @@ def init_db():
                 default_categories
             )
 
+
 # ---------- Категории ----------
 def load_categories():
     with get_conn() as conn:
@@ -91,6 +101,7 @@ def match_category(text, cats_df, cat_type):
             return cid, cname, kw
     return None
 
+
 # ---------- Транзакции ----------
 def add_transaction(d, amount, category_id, cat_type, description):
     with get_conn() as conn:
@@ -109,6 +120,7 @@ def load_transactions():
             LEFT JOIN categories c ON c.id = t.category_id
             ORDER BY t.date DESC, t.id DESC
         """, conn)
+
 
 # ---------- Инициализация ----------
 init_db()
