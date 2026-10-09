@@ -208,16 +208,31 @@ st.markdown("""
     details > summary p {
         font-size: 20px !important;
     }
-    /* Уменьшенные метрики внутри блока месяца */
+
+    /* Компактная сетка для метрик внутри блока месяца */
+    .metrics-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        margin-bottom: 4px;
+    }
+    .metric-cell {
+        padding: 0;
+        margin: 0;
+        line-height: 1.15;
+    }
     .mini-metric-label {
         font-size: 14px;
         color: #666;
-        margin-bottom: 2px;
+        margin: 0;
+        padding: 0;
     }
     .mini-metric-value {
         font-size: 20px;
         font-weight: 600;
         color: #111;
+        margin: 0;
+        padding: 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -352,16 +367,21 @@ def page_operations():
 
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
-            # Доходы и расходы за месяц — подпись сверху, цифра снизу
-            c1, c2 = st.columns(2)
-            c1.markdown(
-                f"<div class='mini-metric-label'>💵 Доходы</div>"
-                f"<div class='mini-metric-value'>+{fmt_money(m_income)} ₽</div>",
-                unsafe_allow_html=True
-            )
-            c2.markdown(
-                f"<div class='mini-metric-label'>💸 Расходы</div>"
-                f"<div class='mini-metric-value'>−{fmt_money(m_expense)} ₽</div>",
+            # Доходы и расходы за месяц — жёстко две колонки через CSS Grid
+            # (st.columns схлопывается в одну на мобильных, grid — нет)
+            st.markdown(
+                f"""
+                <div class="metrics-row">
+                    <div class="metric-cell">
+                        <div class="mini-metric-label">💵 Доходы</div>
+                        <div class="mini-metric-value">+{fmt_money(m_income)} ₽</div>
+                    </div>
+                    <div class="metric-cell">
+                        <div class="mini-metric-label">💸 Расходы</div>
+                        <div class="mini-metric-value">−{fmt_money(m_expense)} ₽</div>
+                    </div>
+                </div>
+                """,
                 unsafe_allow_html=True
             )
 
