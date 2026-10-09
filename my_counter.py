@@ -74,20 +74,21 @@ def delete_category(cat_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM categories WHERE id = ? AND is_default = 0", (cat_id,))
 
-def match_category(text, cats_df):
-    """Ищет категорию по ключевым словам. Возвращает (category_id, name, type, matched_kw) или None."""
+def match_category(text, cats_df, cat_type):
+    """Ищет категорию нужного типа по ключевым словам.
+    Возвращает (category_id, name, matched_kw) или None."""
     text_lower = text.lower()
     all_kw = []
-    for _, row in cats_df.iterrows():
+    for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
         for kw in row["keywords"].split(","):
             kw = kw.strip()
             if kw:
-                all_kw.append((len(kw), kw, row["id"], row["name"], row["type"]))
+                all_kw.append((len(kw), kw, row["id"], row["name"]))
     all_kw.sort(reverse=True)
 
-    for _, kw, cid, cname, ctype in all_kw:
+    for _, kw, cid, cname in all_kw:
         if kw in text_lower:
-            return cid, cname, ctype, kw
+            return cid, cname, kw
     return None
 
 # ---------- Транзакции ----------
@@ -127,52 +128,41 @@ if page == "💰 Операции":
     st.title("💰 Учёт доходов и расходов")
 
     with st.sidebar:
-        st.header("➕ Добавить операцию")
+        op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
+        is_expense = op_type == "Расход"
+        cat_type = "expense" if is_expense else "income"
+
+        st.header(f"➕ Добавить {'расход' if is_expense else 'доход'}")
 
         op_date = st.date_input("Дата", value=date.today())
         amount = st.number_input("Сумма (₽)", min_value=1, step=10, format="%d")
         description = st.text_input(
-            "На что потрачено / как заработано",
-            placeholder="например: вб кроссовки, пятёрочка, зарплата"
+            "На что потрачено" if is_expense else "Как заработано",
+            placeholder="например: вб кроссовки, пятёрочка"
+            if is_expense else "например: зарплата, фриланс"
         )
 
         matched = None
         if description:
-            matched = match_category(description, cats_df)
+            matched = match_category(description, cats_df, cat_type)
 
         if matched:
-            cid, cname, ctype, kw = matched
-            emoji = "💸" if ctype == "expense" else "💵"
-            st.success(f"{emoji} Категория: **{cname}** (по слову «{kw}»)")
+            cid, cname, kw = matched
+            st.success(f"Категория: **{cname}** (по слову «{kw}»)")
         elif description:
-            st.warning("⚠️ Категория не распознана — выбери вручную")
-
-        with st.expander("Выбрать категорию вручную", expanded=not matched):
-            cat_options = cats_df.copy()
-            cat_options["label"] = cat_options.apply(
-                lambda r: f"{'💸' if r['type']=='expense' else '💵'} {r['name']}",
-                axis=1
-            )
-            manual = st.selectbox(
-                "Категория",
-                options=cat_options["id"].tolist(),
-                format_func=lambda i: cat_options.loc[
-                    cat_options["id"] == i, "label"
-                ].values[0],
-                key="manual_cat"
-            )
+            st.warning("⚠️ Категория не распознана")
 
         if st.button("Добавить", type="primary", use_container_width=True):
             if not description.strip():
                 st.error("Введи описание")
+            elif not matched:
+                st.error(
+                    "Не удалось определить категорию. "
+                    "Добавь нужное слово в разделе «🏷️ Категории»."
+                )
             else:
-                if matched:
-                    cid, cname, ctype, _ = matched
-                else:
-                    row = cats_df[cats_df["id"] == manual].iloc[0]
-                    cid, cname, ctype = row["id"], row["name"], row["type"]
-
-                add_transaction(op_date, amount, cid, ctype, description)
+                cid, cname, _ = matched
+                add_transaction(op_date, amount, cid, cat_type, description)
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
 
