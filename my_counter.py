@@ -39,13 +39,17 @@ def init_db():
                 FOREIGN KEY (category_id) REFERENCES categories(id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
-        # Миграция: добавить comment, если её ещё нет
         cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
         if "comment" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
 
-        # Засеять дефолтные категории, если таблица пуста
         cur = conn.execute("SELECT COUNT(*) FROM categories")
         if cur.fetchone()[0] == 0:
             default_categories = [
@@ -67,6 +71,28 @@ def init_db():
             )
 
 
+# ---------- Настройки ----------
+def get_setting(key, default=None):
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+def set_setting(key, value):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value))
+        )
+
+def get_initial_balance():
+    val = get_setting("initial_balance")
+    return int(val) if val is not None else None
+
+def set_initial_balance(amount):
+    set_setting("initial_balance", int(amount))
+
+
 # ---------- Категории ----------
 def load_categories():
     with get_conn() as conn:
@@ -84,23 +110,16 @@ def delete_category(cat_id):
         conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
 
 def get_keywords(cat_id):
-    """Возвращает список ключевых слов категории."""
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT keywords FROM categories WHERE id = ?", (cat_id,)
-        ).fetchone()
+        row = conn.execute("SELECT keywords FROM categories WHERE id = ?", (cat_id,)).fetchone()
     if not row or not row[0]:
         return []
     return [kw.strip() for kw in row[0].split(",") if kw.strip()]
 
 def save_keywords(cat_id, keywords_list):
-    """Сохраняет список ключевых слов как строку через запятую."""
     joined = ",".join(k.strip().lower() for k in keywords_list if k.strip())
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE categories SET keywords = ? WHERE id = ?",
-            (joined, cat_id)
-        )
+        conn.execute("UPDATE categories SET keywords = ? WHERE id = ?", (joined, cat_id))
 
 def add_keyword(cat_id, kw):
     kws = get_keywords(cat_id)
@@ -160,6 +179,33 @@ st.set_page_config(page_title="Мои финансы", page_icon="💰", layout=
 
 
 # ============================================================
+# ЭКРАН ПЕРВОГО ЗАПУСКА
+# ============================================================
+def page_onboarding():
+    st.title("👋 Добро пожаловать в учёт финансов")
+
+    st.markdown(
+        "Чтобы правильно считать баланс, скажи: **сколько денег у тебя сейчас?**\n\n"
+        "Это будет точкой отсчёта. Дальше приложение будет прибавлять доходы "
+        "и вычитать расходы от этой суммы."
+    )
+
+    with st.form("onboarding"):
+        initial = st.number_input(
+            "Начальная сумма (₽)",
+            min_value=0,
+            step=1000,
+            format="%d",
+            value=0
+        )
+        submitted = st.form_submit_button("Начать учёт", type="primary")
+
+        if submitted:
+            set_initial_balance(initial)
+            st.rerun()
+
+
+# ============================================================
 # СТРАНИЦА: ОПЕРАЦИИ
 # ============================================================
 def page_operations():
@@ -168,6 +214,7 @@ def page_operations():
     cats_df = load_categories()
 
     with st.sidebar:
+        # ---- Форма добавления ----
         op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
         is_expense = op_type == "Расход"
         cat_type = "expense" if is_expense else "income"
@@ -203,20 +250,45 @@ def page_operations():
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
 
+        # ---- Настройки баланса ----
+        st.divider()
+        with st.expander("⚙️ Начальный баланс"):
+            current_initial = get_initial_balance() or 0
+            new_initial = st.number_input(
+                "Начальная сумма (₽)",
+                min_value=0,
+                step=1000,
+                format="%d",
+                value=int(current_initial),
+                key="edit_initial"
+            )
+            if st.button("Сохранить", use_container_width=True):
+                set_initial_balance(new_initial)
+                st.success("Сохранено")
+                st.rerun()
+
     df = load_transactions()
 
     if df.empty:
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
+    # ---- Метрики ----
+    initial = get_initial_balance() or 0
     total_income = df.loc[df["type"] == "income", "amount"].sum()
     total_expense = df.loc[df["type"] == "expense", "amount"].sum()
-    balance = total_income - total_expense
+    change = total_income - total_expense
+    current_balance = initial + change
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("💵 Доходы", f"{total_income:,} ₽".replace(",", " "))
     col2.metric("💸 Расходы", f"{total_expense:,} ₽".replace(",", " "))
-    col3.metric("📊 Баланс", f"{balance:,} ₽".replace(",", " "))
+    col3.metric("📈 Изменение", f"{change:,} ₽".replace(",", " "))
+    col4.metric(
+        "💼 Текущий баланс",
+        f"{current_balance:,} ₽".replace(",", " "),
+        delta=f"старт: {initial:,} ₽".replace(",", " ")
+    )
 
     st.divider()
     st.subheader("Все операции")
@@ -240,7 +312,6 @@ def page_categories():
 
     cats_df = load_categories()
 
-    # ---------- Добавление категории ----------
     with st.expander("➕ Добавить категорию"):
         with st.form("add_cat", clear_on_submit=True):
             new_name = st.text_input("Название")
@@ -262,14 +333,12 @@ def page_categories():
 
     st.subheader("Существующие категории")
 
-    # ---------- Список категорий ----------
     for _, row in cats_df.iterrows():
         emoji = "💸" if row["type"] == "expense" else "💵"
         cat_id = row["id"]
         kws = get_keywords(cat_id)
 
         with st.expander(f"{emoji} {row['name']}  ·  {len(kws)} слов"):
-            # ---- Ключевые слова ----
             st.markdown("**Ключевые слова**")
 
             if not kws:
@@ -286,7 +355,6 @@ def page_categories():
                         remove_keyword(cat_id, kw)
                         st.rerun()
 
-            # ---- Добавить слово ----
             with st.form(f"addkw_{cat_id}", clear_on_submit=True):
                 c1, c2 = st.columns([4, 1])
                 new_kw = c1.text_input(
@@ -301,7 +369,6 @@ def page_categories():
 
             st.divider()
 
-            # ---- Удалить категорию ----
             if st.button("🗑️ Удалить категорию", key=f"delcat_{cat_id}"):
                 delete_category(cat_id)
                 st.rerun()
@@ -310,10 +377,13 @@ def page_categories():
 # ============================================================
 # НАВИГАЦИЯ (МЕНЮ)
 # ============================================================
-pages = [
-    st.Page(page_operations, title="Операции", icon="💰", default=True),
-    st.Page(page_categories, title="Категории", icon="🏷️"),
-]
-
-nav = st.navigation(pages, position="sidebar")
-nav.run()
+# Показываем онбординг, пока не задан начальный баланс
+if get_initial_balance() is None:
+    page_onboarding()
+else:
+    pages = [
+        st.Page(page_operations, title="Операции", icon="💰", default=True),
+        st.Page(page_categories, title="Категории", icon="🏷️"),
+    ]
+    nav = st.navigation(pages, position="sidebar")
+    nav.run()
