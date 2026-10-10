@@ -15,6 +15,20 @@ MONTHS_RU = [
     "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
 ]
 
+# ---------- Список «правильных» категорий ----------
+DESIRED_CATEGORIES = [
+    ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
+    ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
+    ("Еда",             "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
+    ("Транспорт",       "expense", "проездной,тройка,стрелка,метро,автобус"),
+    ("Спорт",           "expense", "соревнования,семинар,аттестация"),
+    ("Зарплата",        "income",  "100б,судейство,зарплата,аванс,зп"),
+    ("Переводы",        "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
+    ("Другое (расход)", "expense", ""),
+    ("Другое (доход)",  "income",  ""),
+]
+DESIRED_NAMES = {c[0] for c in DESIRED_CATEGORIES}
+
 
 # ============================================================
 # РАБОТА С БД
@@ -56,39 +70,57 @@ def init_db():
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
 
 
-# ---------- Миграция дефолтных категорий ----------
-def migrate_categories():
-    """Добавляет недостающие дефолтные категории.
-    Ключевые слова у существующих категорий НЕ трогает —
-    чтобы не затирать ручные правки пользователя."""
-    desired = [
-        # --- Расходы ---
-        ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
-        ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
-        ("Еда",             "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
-        ("Транспорт",       "expense", "проездной,тройка,стрелка,метро,автобус"),
-        ("Спорт",           "expense", "соревнования,семинар,аттестация"),
-        # --- Доходы ---
-        ("Зарплата",        "income",  "100б,судейство,зарплата,аванс,зп"),
-        ("Переводы",        "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
-        # --- Fallback ---
-        ("Другое (расход)", "expense", ""),
-        ("Другое (доход)",  "income",  ""),
-    ]
+# ---------- Синхронизация категорий ----------
+def sync_categories():
+    """Приводит таблицу категорий в соответствие с DESIRED_CATEGORIES:
+    - добавляет отсутствующие
+    - удаляет лишние, переназначая их операции на 'Другое' нужного типа
+    """
     with get_conn() as conn:
-        existing = {row[0] for row in conn.execute("SELECT name FROM categories").fetchall()}
-        added = []
-        for name, t, kws in desired:
+        # 1) Добавляем недостающие
+        existing = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT name, type FROM categories").fetchall()
+        }
+        for name, t, kws in DESIRED_CATEGORIES:
             if name not in existing:
                 try:
                     conn.execute(
                         "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
                         (name, t, kws)
                     )
-                    added.append(name)
                 except sqlite3.IntegrityError:
                     pass
-    return added
+
+        # 2) Находим id категорий «Другое» для переназначения
+        def get_id(name):
+            row = conn.execute(
+                "SELECT id FROM categories WHERE name = ?", (name,)
+            ).fetchone()
+            return row[0] if row else None
+
+        other_expense_id = get_id("Другое (расход)")
+        other_income_id = get_id("Другое (доход)")
+
+        # 3) Удаляем лишние, переназначая их операции
+        all_rows = conn.execute("SELECT id, name, type FROM categories").fetchall()
+        for cid, cname, ctype in all_rows:
+            if cname in DESIRED_NAMES:
+                continue
+            # Категория лишняя — переназначаем её операции
+            target = other_expense_id if ctype == "expense" else other_income_id
+            if target is not None:
+                conn.execute(
+                    "UPDATE transactions SET category_id = ? WHERE category_id = ?",
+                    (target, cid)
+                )
+            else:
+                # На всякий случай — обнуляем ссылку
+                conn.execute(
+                    "UPDATE transactions SET category_id = NULL WHERE category_id = ?",
+                    (cid,)
+                )
+            conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
 
 
 # ---------- Настройки ----------
@@ -156,7 +188,6 @@ def remove_keyword(cat_id, kw):
 
 
 def get_other_category(cat_type):
-    """Возвращает (id, name) для fallback-категории 'Другое' нужного типа."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, name FROM categories WHERE type = ? AND name LIKE 'Другое%' LIMIT 1",
@@ -166,7 +197,6 @@ def get_other_category(cat_type):
 
 
 def match_category(text, cats_df, cat_type):
-    """Ищет категорию по ключевым словам. Если не находит — возвращает 'Другое'."""
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
@@ -266,7 +296,7 @@ def render_transactions_table(df_m):
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
 init_db()
-migrate_categories()
+sync_categories()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
