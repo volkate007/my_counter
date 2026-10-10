@@ -72,18 +72,20 @@ def init_db():
 
 # ---------- Синхронизация категорий ----------
 def sync_categories():
-    """Приводит таблицу категорий в соответствие с DESIRED_CATEGORIES:
-    - добавляет отсутствующие
-    - удаляет лишние, переназначая их операции на 'Другое' нужного типа
-    """
+    """Полная синхронизация: обновляет название/тип/ключи у существующих,
+    добавляет недостающие, удаляет лишние с переназначением операций на 'Другое'."""
     with get_conn() as conn:
-        # 1) Добавляем недостающие
-        existing = {
-            row[0]: row[1]
-            for row in conn.execute("SELECT name, type FROM categories").fetchall()
-        }
+        # 1) Добавляем или обновляем
         for name, t, kws in DESIRED_CATEGORIES:
-            if name not in existing:
+            row = conn.execute(
+                "SELECT id FROM categories WHERE name = ?", (name,)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE categories SET type = ?, keywords = ? WHERE name = ?",
+                    (t, kws, name)
+                )
+            else:
                 try:
                     conn.execute(
                         "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
@@ -92,7 +94,7 @@ def sync_categories():
                 except sqlite3.IntegrityError:
                     pass
 
-        # 2) Находим id категорий «Другое» для переназначения
+        # 2) id категорий «Другое»
         def get_id(name):
             row = conn.execute(
                 "SELECT id FROM categories WHERE name = ?", (name,)
@@ -102,12 +104,11 @@ def sync_categories():
         other_expense_id = get_id("Другое (расход)")
         other_income_id = get_id("Другое (доход)")
 
-        # 3) Удаляем лишние, переназначая их операции
+        # 3) Удаляем лишние
         all_rows = conn.execute("SELECT id, name, type FROM categories").fetchall()
         for cid, cname, ctype in all_rows:
             if cname in DESIRED_NAMES:
                 continue
-            # Категория лишняя — переназначаем её операции
             target = other_expense_id if ctype == "expense" else other_income_id
             if target is not None:
                 conn.execute(
@@ -115,7 +116,6 @@ def sync_categories():
                     (target, cid)
                 )
             else:
-                # На всякий случай — обнуляем ссылку
                 conn.execute(
                     "UPDATE transactions SET category_id = NULL WHERE category_id = ?",
                     (cid,)
