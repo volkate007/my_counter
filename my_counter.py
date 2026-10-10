@@ -17,7 +17,6 @@ DESIRED_CATEGORIES = [
 ]
 DESIRED_NAMES = {c[0] for c in DESIRED_CATEGORIES}
 
-# TTL для чтения при ОТОБРАЖЕНИИ (не для операций записи!)
 CACHE_TTL = 30
 
 
@@ -64,6 +63,7 @@ def _load_transactions_df():
 
 
 def _save_categories_df(df):
+    """Сохраняет категории. Если лист в порядке — только дописывает недостающие."""
     conn = get_conn()
     conn.update(worksheet="categories", data=df)
     conn.clear()
@@ -73,7 +73,6 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
     """Читает СВЕЖИЕ данные, добавляет строку, пишет всё обратно."""
     conn = get_conn()
 
-    # КРИТИЧНО: читаем свежие данные перед записью, иначе затрём чужие операции
     existing = _fresh_read(
         "transactions",
         ["date", "type", "amount", "category", "description", "comment"]
@@ -89,7 +88,7 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
     }])
     combined = pd.concat([existing, new_row], ignore_index=True)
     conn.update(worksheet="transactions", data=combined)
-    conn.clear()  # сбрасываем кэш, чтобы следующее чтение показало свежее
+    conn.clear()
 
 
 # ---------- Настройки ----------
@@ -103,8 +102,6 @@ def get_setting(key, default=None):
 
 def set_setting(key, value):
     conn = get_conn()
-
-    # Свежее чтение перед записью
     df = _fresh_read("settings", ["key", "value"])
 
     df["key"] = df["key"].astype(str)
@@ -178,28 +175,55 @@ def match_category(text, cats_df, cat_type):
 
 
 def sync_categories():
-    """Синхронизирует категории. Не трогает транзакции."""
+    """Проверяет, что в categories есть все нужные категории.
+    НИЧЕГО не удаляет и не перезаписывает без нужды.
+    Если чтение упало — не делает ничего."""
     conn = get_conn()
 
-    # Свежее чтение категорий
-    cats_df = _fresh_read("categories", ["name", "type", "keywords"])
+    try:
+        cats_df = conn.read(worksheet="categories", ttl=0)
+    except Exception:
+        # Ошибка чтения (429 и т.п.) — не трогаем лист, чтобы не стереть данные
+        return
 
-    existing = {str(row["name"]) for _, row in cats_df.iterrows()}
+    # Проверяем, что структура правильная
+    is_broken = (
+        cats_df.empty
+        or "name" not in cats_df.columns
+        or "type" not in cats_df.columns
+        or "keywords" not in cats_df.columns
+    )
 
-    for name, t, kws in DESIRED_CATEGORIES:
-        if name in existing:
-            cats_df.loc[cats_df["name"] == name, "type"] = t
-            cats_df.loc[cats_df["name"] == name, "keywords"] = kws
-        else:
-            cats_df = pd.concat([
-                cats_df,
-                pd.DataFrame([{"name": name, "type": t, "keywords": kws}])
-            ], ignore_index=True)
+    if is_broken:
+        # Лист пустой или сломан — пересоздаём с дефолтами
+        new_df = pd.DataFrame([
+            {"name": n, "type": t, "keywords": k}
+            for n, t, k in DESIRED_CATEGORIES
+        ])
+        try:
+            conn.update(worksheet="categories", data=new_df)
+            conn.clear()
+        except Exception:
+            pass
+        return
 
-    cats_df = cats_df[cats_df["name"].isin(DESIRED_NAMES)].reset_index(drop=True)
+    # Лист в порядке — проверяем, все ли нужные категории на месте
+    cats_df = cats_df.dropna(how="all").reset_index(drop=True)
+    existing = set(cats_df["name"].astype(str))
 
-    conn.update(worksheet="categories", data=cats_df)
-    conn.clear()
+    missing = [c for c in DESIRED_CATEGORIES if c[0] not in existing]
+
+    if missing:
+        rows_to_add = pd.DataFrame([
+            {"name": n, "type": t, "keywords": k}
+            for n, t, k in missing
+        ])
+        combined = pd.concat([cats_df, rows_to_add], ignore_index=True)
+        try:
+            conn.update(worksheet="categories", data=combined)
+            conn.clear()
+        except Exception:
+            pass
 
 
 # ---------- Вспомогательные ----------
@@ -235,7 +259,7 @@ def fmt_date(iso_date):
 # ============================================================
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# Синхронизация — один раз за сессию
+# Синхронизация — только если её ещё не было в этой сессии
 if "synced" not in st.session_state:
     sync_categories()
     st.session_state.synced = True
@@ -431,7 +455,6 @@ def page_categories():
                 if not new_name.strip():
                     st.error("Введи название")
                 else:
-                    # Свежее чтение перед записью
                     fresh = _fresh_read("categories", ["name", "type", "keywords"])
                     fresh = pd.concat([fresh, pd.DataFrame([{
                         "name": new_name.strip(),
