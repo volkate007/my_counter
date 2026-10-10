@@ -29,6 +29,16 @@ def get_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
 
+def _normalize_category(cat):
+    """Приводит 'Другое (расход)' / 'Другое (доход)' к 'Другое'."""
+    if cat is None:
+        return ""
+    cat = str(cat).strip()
+    if cat.lower().startswith("другое"):
+        return "Другое"
+    return cat
+
+
 def _fresh_read(worksheet, columns):
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=0)
@@ -59,11 +69,19 @@ def _load_categories_df():
         return pd.DataFrame(
             [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
         )
+    # Нормализуем название категории
+    df["name"] = df["name"].apply(_normalize_category)
+    # Удаляем дубликаты, оставляя первый
+    df = df.drop_duplicates(subset=["name"], keep="first").reset_index(drop=True)
     return df
 
 
 def _load_transactions_df():
-    return _cached_read("transactions", TX_COLUMNS)
+    df = _cached_read("transactions", TX_COLUMNS)
+    if not df.empty:
+        # Нормализуем категорию при чтении (не трогаем таблицу)
+        df["category"] = df["category"].apply(_normalize_category)
+    return df
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
@@ -122,7 +140,7 @@ def set_initial_balance(amount):
 # ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
     """Ищет категорию по ключевым словам.
-    Категория «Другое» имеет тип 'both' и не участвует в поиске.
+    «Другое» (both) не участвует в поиске.
     Если ничего не найдено — возвращает 'Другое'."""
     text_lower = (text or "").lower()
     all_kw = []
@@ -130,10 +148,8 @@ def match_category(text, cats_df, cat_type):
         name = str(row["name"])
         row_type = str(row["type"])
 
-        # Пропускаем «Другое» при поиске
         if name == "Другое":
             continue
-        # Категория должна подходить по типу (или быть both)
         if row_type != cat_type and row_type != "both":
             continue
 
@@ -147,7 +163,6 @@ def match_category(text, cats_df, cat_type):
         if kw in text_lower:
             return cname, kw
 
-    # Ничего не нашли — возвращаем «Другое»
     return "Другое", None
 
 
@@ -292,7 +307,6 @@ def page_operations():
         description = st.text_input("Категория", key=f"desc_{st.session_state.form_key}")
         comment = st.text_input("Комментарий", key=f"comment_{st.session_state.form_key}")
 
-        # Живая подсказка
         matched_name, matched_kw = None, None
         if description:
             matched_name, matched_kw = match_category(description, cats_df, cat_type)
@@ -420,7 +434,7 @@ def page_categories():
         elif row_type == "income":
             emoji = "💵"
         else:
-            emoji = "🔹"  # «Другое» — both
+            emoji = "🔹"
 
         kws = [kw.strip() for kw in str(row["keywords"]).split(",") if kw.strip()]
 
