@@ -7,15 +7,14 @@ from streamlit_gsheets import GSheetsConnection
 # КАТЕГОРИИ — ИСТОЧНИК ПРАВДЫ
 # ============================================================
 DESIRED_CATEGORIES = [
-    ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
-    ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
-    ("Еда",             "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
-    ("Транспорт",       "expense", "проездной,тройка,стрелка,метро,автобус"),
-    ("Спорт",           "expense", "соревнования,семинар,аттестация,взнос спорт"),
-    ("Зарплата",        "income",  "100б,судейство,зарплата,аванс,зп"),
-    ("Переводы",        "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
-    ("Другое (расход)", "expense", ""),
-    ("Другое (доход)",  "income",  ""),
+    ("Продукты",    "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
+    ("Маркетплейс", "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
+    ("Еда",         "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
+    ("Транспорт",   "expense", "проездной,тройка,стрелка,метро,автобус"),
+    ("Спорт",       "expense", "соревнования,семинар,аттестация"),
+    ("Зарплата",    "income",  "100б,судейство,зарплата,аванс,зп"),
+    ("Переводы",    "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
+    ("Другое",      "both",    ""),
 ]
 
 CACHE_TTL = 30
@@ -122,20 +121,34 @@ def set_initial_balance(amount):
 
 # ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
+    """Ищет категорию по ключевым словам.
+    Категория «Другое» имеет тип 'both' и не участвует в поиске.
+    Если ничего не найдено — возвращает 'Другое'."""
     text_lower = (text or "").lower()
     all_kw = []
     for _, row in cats_df.iterrows():
-        if str(row["name"]).startswith("Другое") or row["type"] != cat_type:
+        name = str(row["name"])
+        row_type = str(row["type"])
+
+        # Пропускаем «Другое» при поиске
+        if name == "Другое":
             continue
+        # Категория должна подходить по типу (или быть both)
+        if row_type != cat_type and row_type != "both":
+            continue
+
         for kw in str(row["keywords"]).split(","):
             kw = kw.strip()
             if kw:
-                all_kw.append((len(kw), kw, row["name"]))
+                all_kw.append((len(kw), kw, name))
+
     all_kw.sort(reverse=True)
     for _, kw, cname in all_kw:
         if kw in text_lower:
             return cname, kw
-    return None, None
+
+    # Ничего не нашли — возвращаем «Другое»
+    return "Другое", None
 
 
 # ---------- Вспомогательные ----------
@@ -167,8 +180,6 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
-    """Рисует таблицу операций за один день.
-    Колонки: Дата | Сумма | Категория | Описание | Комментарий."""
     view = day_df.copy().reset_index(drop=True)
 
     view["date_str"] = view["date"].apply(fmt_date)
@@ -180,7 +191,6 @@ def render_day_table(day_df):
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    # Пустые значения — пустая строка
     for col in ["category", "description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
@@ -282,7 +292,7 @@ def page_operations():
         description = st.text_input("Категория", key=f"desc_{st.session_state.form_key}")
         comment = st.text_input("Комментарий", key=f"comment_{st.session_state.form_key}")
 
-        # Живая подсказка категории (регистр не важен)
+        # Живая подсказка
         matched_name, matched_kw = None, None
         if description:
             matched_name, matched_kw = match_category(description, cats_df, cat_type)
@@ -290,10 +300,7 @@ def page_operations():
                 if matched_kw:
                     st.success(f"Категория: **{matched_name}** (по слову «{matched_kw}»)")
                 else:
-                    st.info(f"Категория: **{matched_name}**")
-            else:
-                other = "Другое (расход)" if is_expense else "Другое (доход)"
-                st.info(f"Категория: **{other}** (слово не распознано)")
+                    st.info(f"Категория: **{matched_name}** (слово не распознано)")
 
         if st.button("Добавить", type="primary", use_container_width=True):
             if amount is None:
@@ -301,14 +308,12 @@ def page_operations():
             elif not description.strip():
                 st.error("Введи категорию")
             else:
-                # Приводим ввод к нижнему регистру
                 description_clean = description.strip().lower()
                 comment_clean = comment.strip().lower()
 
-                # Пересчитываем категорию уже по очищенному тексту
                 matched_name_final, _ = match_category(description_clean, cats_df, cat_type)
                 if not matched_name_final:
-                    matched_name_final = "Другое (расход)" if is_expense else "Другое (доход)"
+                    matched_name_final = "Другое"
 
                 _append_transaction(
                     op_date, amount, matched_name_final, cat_type,
@@ -407,10 +412,19 @@ def page_categories():
         return
 
     for _, row in cats_df.iterrows():
-        emoji = "💸" if row["type"] == "expense" else "💵"
+        name = str(row["name"])
+        row_type = str(row["type"])
+
+        if row_type == "expense":
+            emoji = "💸"
+        elif row_type == "income":
+            emoji = "💵"
+        else:
+            emoji = "🔹"  # «Другое» — both
+
         kws = [kw.strip() for kw in str(row["keywords"]).split(",") if kw.strip()]
 
-        with st.expander(f"{emoji} {row['name']}  ·  {len(kws)} слов"):
+        with st.expander(f"{emoji} {name}  ·  {len(kws)} слов"):
             if not kws:
                 st.caption("Нет ключевых слов.")
             else:
