@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import uuid
 from datetime import date
 from streamlit_gsheets import GSheetsConnection
 
@@ -20,7 +19,7 @@ DESIRED_CATEGORIES = [
 ]
 
 CACHE_TTL = 30
-TX_COLUMNS = ["id", "date", "type", "amount", "category", "description", "comment"]
+TX_COLUMNS = ["date", "type", "amount", "category", "description", "comment"]
 
 
 # ============================================================
@@ -64,66 +63,13 @@ def _load_categories_df():
     return df
 
 
-# ============================================================
-# ТРАНЗАКЦИИ
-# ============================================================
 def _load_transactions_df():
-    df = _cached_read("transactions", TX_COLUMNS)
-    if df.empty:
-        return df
-
-    # Приводим id к строке
-    df["id"] = df["id"].fillna("").astype(str).str.strip()
-
-    # Если есть строки с пустым id — генерируем и сохраняем обратно
-    empty_mask = df["id"] == ""
-    if empty_mask.any():
-        existing_nums = []
-        for v in df.loc[~empty_mask, "id"]:
-            try:
-                existing_nums.append(int(v))
-            except ValueError:
-                pass
-        next_num = max(existing_nums) + 1 if existing_nums else 1
-
-        for idx in df.index[empty_mask]:
-            df.at[idx, "id"] = str(next_num)
-            next_num += 1
-
-        try:
-            conn = get_conn()
-            to_save = df[TX_COLUMNS].copy().fillna("")
-            conn.update(worksheet="transactions", data=to_save)
-            conn.clear()
-        except Exception:
-            pass
-
-    return df
-
-
-def _write_transactions_df(df):
-    conn = get_conn()
-    df = df[TX_COLUMNS].copy()
-    df = df.fillna("")
-    conn.update(worksheet="transactions", data=df)
-    conn.clear()
+    return _cached_read("transactions", TX_COLUMNS)
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
     df = _fresh_read("transactions", TX_COLUMNS)
-    if df.empty:
-        df = pd.DataFrame(columns=TX_COLUMNS)
-    # Генерируем числовой id
-    existing_nums = []
-    for v in df.get("id", []):
-        try:
-            existing_nums.append(int(str(v)))
-        except (ValueError, TypeError):
-            pass
-    next_id = str(max(existing_nums) + 1) if existing_nums else "1"
-
     new_row = pd.DataFrame([{
-        "id": next_id,
         "date": d.isoformat(),
         "type": cat_type,
         "amount": int(amount),
@@ -132,29 +78,9 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
         "comment": comment,
     }])
     combined = pd.concat([df, new_row], ignore_index=True)
-    _write_transactions_df(combined)
-
-
-def _update_transaction(tx_id, **fields):
-    df = _fresh_read("transactions", TX_COLUMNS)
-    mask = df["id"].astype(str) == str(tx_id)
-    if not mask.any():
-        return False
-    for k, v in fields.items():
-        if k in df.columns:
-            df.loc[mask, k] = v
-    _write_transactions_df(df)
-    return True
-
-
-def _delete_transaction(tx_id):
-    df = _fresh_read("transactions", TX_COLUMNS)
-    mask = df["id"].astype(str) == str(tx_id)
-    if not mask.any():
-        return False
-    df = df[~mask].reset_index(drop=True)
-    _write_transactions_df(df)
-    return True
+    conn = get_conn()
+    conn.update(worksheet="transactions", data=combined.fillna(""))
+    conn.clear()
 
 
 # ---------- Настройки ----------
@@ -240,58 +166,49 @@ def fmt_date(iso_date):
         return iso_date
 
 
-# ============================================================
-# ДИАЛОГ РЕДАКТИРОВАНИЯ
-# ============================================================
-@st.dialog("✏️ Редактирование операции")
-def edit_dialog(tx):
-    cats_df = _load_categories_df()
+def render_day_table(day_df):
+    """Рисует таблицу операций за один день.
+    Колонки: Дата | Сумма | Категория | Описание | Комментарий.
+    Сумма — цветная, со знаком. Пустые ячейки — не None, а пустая строка."""
+    view = day_df.copy().reset_index(drop=True)
 
-    is_expense = tx["type"] == "expense"
-    cat_type = tx["type"]
+    # Форматируем дату
+    view["date_str"] = view["date"].apply(fmt_date)
 
-    try:
-        d_val = pd.to_datetime(tx["date"]).date()
-    except Exception:
-        d_val = date.today()
+    # Форматируем сумму со знаком
+    def signed(row):
+        val = int(row["amount"])
+        sign = "+" if row["type"] == "income" else "−"
+        return f"{sign}{val:,}".replace(",", " ")
 
-    new_date = st.date_input("Дата", value=d_val)
-    new_amount = st.number_input(
-        "Сумма (₽)",
-        min_value=1, step=10, format="%d",
-        value=int(float(tx["amount"])) if str(tx["amount"]).strip() else 1
-    )
-    new_description = st.text_input("Категория", value=str(tx.get("description", "") or ""))
-    new_comment = st.text_input("Комментарий", value=str(tx.get("comment", "") or ""))
+    view["amount_str"] = view.apply(signed, axis=1)
 
-    matched_name, matched_kw = None, None
-    if new_description:
-        matched_name, matched_kw = match_category(new_description, cats_df, cat_type)
-        if matched_name:
-            if matched_kw:
-                st.success(f"Категория: **{matched_name}** (по слову «{matched_kw}»)")
-            else:
-                st.info(f"Категория: **{matched_name}**")
-        else:
-            other = "Другое (расход)" if is_expense else "Другое (доход)"
-            st.info(f"Категория: **{other}** (слово не распознано)")
+    # Убираем None в текстовых колонках
+    for col in ["category", "description", "comment"]:
+        view[col] = view[col].fillna("").astype(str)
 
-    col1, col2 = st.columns(2)
-    if col1.button("💾 Сохранить", type="primary", use_container_width=True):
-        if not matched_name:
-            matched_name = "Другое (расход)" if is_expense else "Другое (доход)"
-        _update_transaction(
-            tx["id"],
-            date=new_date.isoformat(),
-            amount=int(new_amount),
-            category=matched_name,
-            description=new_description,
-            comment=new_comment,
-        )
-        st.rerun()
+    view = view[["date_str", "amount_str", "category", "description", "comment"]]
+    view = view.rename(columns={
+        "date_str": "Дата",
+        "amount_str": "Сумма",
+        "category": "Категория",
+        "description": "Описание",
+        "comment": "Комментарий",
+    })
 
-    if col2.button("❌ Отмена", use_container_width=True):
-        st.rerun()
+    types = day_df.reset_index(drop=True)["type"].tolist()
+    sum_col_idx = view.columns.get_loc("Сумма")
+
+    def style_row(row):
+        styles = [""] * len(row)
+        i = view.index.get_loc(row.name)
+        t = types[i]
+        color = "#1a8f3a" if t == "income" else "#c0392b"
+        styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
+        return styles
+
+    styled = view.style.apply(style_row, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -338,66 +255,6 @@ def page_onboarding():
                 st.error("Введи начальную сумму")
             else:
                 set_initial_balance(int(initial))
-                st.rerun()
-
-
-# ============================================================
-# ТАБЛИЦА ОПЕРАЦИЙ ЗА ДЕНЬ + КНОПКИ
-# ============================================================
-def render_day_block(day_df):
-    """Рисует таблицу операций за день (как раньше) + кнопки действий снизу."""
-
-    # Готовим данные для отображения
-    view = day_df.copy()
-    view = view.reset_index(drop=True)
-
-    # Сумма со знаком
-    def signed(row):
-        val = int(row["amount"])
-        sign = "+" if row["type"] == "income" else "−"
-        return f"{sign}{val:,}".replace(",", " ")
-
-    view["amount_str"] = view.apply(signed, axis=1)
-
-    # Пустые строки вместо None
-    for col in ["category", "description", "comment"]:
-        view[col] = view[col].fillna("").astype(str)
-
-    # Колонка «№» — чтобы было понятно, к какой строке кнопка
-    view["№"] = range(1, len(view) + 1)
-
-    table = view[["№", "amount_str", "category", "description", "comment"]].rename(columns={
-        "amount_str": "Сумма",
-        "category": "Категория",
-        "description": "Описание",
-        "comment": "Комментарий",
-    })
-
-    # Цветная сумма
-    types = view["type"].tolist()
-    sum_col_idx = table.columns.get_loc("Сумма")
-
-    def style_row(row):
-        styles = [""] * len(row)
-        i = table.index.get_loc(row.name)
-        t = types[i]
-        color = "#1a8f3a" if t == "income" else "#c0392b"
-        styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
-        return styles
-
-    styled = table.style.apply(style_row, axis=1)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # Кнопки действий — под таблицей, столбиком
-    with st.expander("✏️ Редактировать / 🗑️ Удалить", expanded=False):
-        for i, (_, tx) in enumerate(day_df.reset_index(drop=True).iterrows(), start=1):
-            c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 1, 5])
-            c1.markdown(f"**{i}.**")
-            c2.markdown(f"_{str(tx.get('description', '') or '')}_")
-            if c3.button("✏️", key=f"edit_{tx['id']}"):
-                edit_dialog(tx)
-            if c4.button("🗑️", key=f"del_{tx['id']}"):
-                _delete_transaction(tx["id"])
                 st.rerun()
 
 
@@ -522,7 +379,7 @@ def page_operations():
                     f"<div class='day-header'>📆 {pd.Timestamp(d).strftime('%d.%m.%Y')}</div>",
                     unsafe_allow_html=True
                 )
-                render_day_block(day_df)
+                render_day_table(day_df)
 
 
 # ============================================================
