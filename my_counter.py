@@ -27,10 +27,13 @@ def get_conn():
 
 
 def _load_categories_df():
-    """Читает лист categories из Google Sheets."""
     conn = get_conn()
     df = conn.read(worksheet="categories", ttl=0)
-    return df if not df.empty else pd.DataFrame(columns=["name", "type", "keywords"])
+    if df.empty:
+        return pd.DataFrame(columns=["name", "type", "keywords"])
+    # убираем полностью пустые строки
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
 
 
 def _save_categories_df(df):
@@ -39,14 +42,15 @@ def _save_categories_df(df):
 
 
 def _load_transactions_df():
-    """Читает лист transactions."""
     conn = get_conn()
     df = conn.read(worksheet="transactions", ttl=0)
-    return df if not df.empty else pd.DataFrame(columns=["date", "type", "amount", "category", "description", "comment"])
+    if df.empty:
+        return pd.DataFrame(columns=["date", "type", "amount", "category", "description", "comment"])
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
-    """Добавляет одну операцию на лист transactions."""
     conn = get_conn()
     existing = _load_transactions_df()
     new_row = pd.DataFrame([{
@@ -65,32 +69,49 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
 def get_setting(key, default=None):
     conn = get_conn()
     df = conn.read(worksheet="settings", ttl=0)
-    if df.empty or key not in df.columns:
+    if df.empty or "key" not in df.columns:
         return default
-    row = df[df.iloc[:, 0] == key]
-    return row.iloc[0, 1] if not row.empty else default
+    df = df.dropna(how="all")
+    row = df[df["key"].astype(str) == str(key)]
+    return row.iloc[0]["value"] if not row.empty else default
 
 
 def set_setting(key, value):
+    """Всегда пишем строки, чтобы не было LossySetItemError."""
     conn = get_conn()
     df = conn.read(worksheet="settings", ttl=0)
+
     if df.empty:
         df = pd.DataFrame(columns=["key", "value"])
-    mask = df.iloc[:, 0] == key
+
+    # Приводим всё к строке — это ключевой момент
+    df["key"] = df["key"].astype(str)
+    df["value"] = df["value"].astype(str)
+
+    mask = df["key"] == str(key)
     if mask.any():
-        df.loc[mask, df.columns[1]] = str(value)
+        df.loc[mask, "value"] = str(value)
     else:
-        df = pd.concat([df, pd.DataFrame([{"key": key, "value": str(value)}])], ignore_index=True)
+        df = pd.concat(
+            [df, pd.DataFrame([{"key": str(key), "value": str(value)}])],
+            ignore_index=True
+        )
+
     conn.update(worksheet="settings", data=df)
 
 
 def get_initial_balance():
     val = get_setting("initial_balance")
-    return int(val) if val is not None else None
+    if val is None:
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return None
 
 
 def set_initial_balance(amount):
-    set_setting("initial_balance", int(amount))
+    set_setting("initial_balance", str(int(amount)))
 
 
 # ---------- Синхронизация категорий ----------
@@ -110,46 +131,6 @@ def _find_category_by_text(text, cat_type, categories):
         if kw in text_lower:
             return cname
     return None
-
-
-def sync_categories():
-    """Синхронизирует категории и пересчитывает все операции по ключам."""
-    conn = get_conn()
-
-    # 1) Категории
-    cats_df = _load_categories_df()
-    existing = {row["name"] for _, row in cats_df.iterrows()} if not cats_df.empty else set()
-
-    for name, t, kws in DESIRED_CATEGORIES:
-        if name in existing:
-            cats_df.loc[cats_df["name"] == name, "type"] = t
-            cats_df.loc[cats_df["name"] == name, "keywords"] = kws
-        else:
-            cats_df = pd.concat([
-                cats_df,
-                pd.DataFrame([{"name": name, "type": t, "keywords": kws}])
-            ], ignore_index=True)
-
-    # Удаляем лишние категории
-    cats_df = cats_df[cats_df["name"].isin(DESIRED_NAMES)].reset_index(drop=True)
-    _save_categories_df(cats_df)
-
-    # 2) Операции — пересчитываем категории по ключам
-    ops_df = _load_transactions_df()
-    if not ops_df.empty:
-        cat_list = [(row["name"], row["keywords"]) for _, row in cats_df.iterrows()]
-        other_exp = "Другое (расход)"
-        other_inc = "Другое (доход)"
-
-        def recategorize(row):
-            candidates = [(n, k) for n, k in cat_list if n.startswith("Другое") or _get_type_for(n, cats_df) == row["type"]]
-            found = _find_category_by_text(row["description"], row["type"], candidates)
-            if found:
-                return found
-            return other_exp if row["type"] == "expense" else other_inc
-
-        ops_df["category"] = ops_df.apply(recategorize, axis=1)
-        conn.update(worksheet="transactions", data=ops_df)
 
 
 def _get_type_for(name, cats_df):
@@ -174,6 +155,57 @@ def match_category(text, cats_df, cat_type):
     return None, None
 
 
+def sync_categories():
+    """Синхронизирует категории и пересчитывает все операции по ключам."""
+    conn = get_conn()
+
+    # 1) Категории
+    cats_df = _load_categories_df()
+
+    # Убеждаемся, что нужные колонки есть
+    for col in ["name", "type", "keywords"]:
+        if col not in cats_df.columns:
+            cats_df[col] = ""
+
+    existing = {str(row["name"]) for _, row in cats_df.iterrows()}
+
+    for name, t, kws in DESIRED_CATEGORIES:
+        if name in existing:
+            cats_df.loc[cats_df["name"] == name, "type"] = t
+            cats_df.loc[cats_df["name"] == name, "keywords"] = kws
+        else:
+            cats_df = pd.concat([
+                cats_df,
+                pd.DataFrame([{"name": name, "type": t, "keywords": kws}])
+            ], ignore_index=True)
+
+    # Удаляем лишние категории
+    cats_df = cats_df[cats_df["name"].isin(DESIRED_NAMES)].reset_index(drop=True)
+    _save_categories_df(cats_df)
+
+    # 2) Операции — пересчитываем категории по ключам
+    ops_df = _load_transactions_df()
+    if not ops_df.empty and "description" in ops_df.columns:
+        cat_list = [(row["name"], row["keywords"]) for _, row in cats_df.iterrows()]
+        other_exp = "Другое (расход)"
+        other_inc = "Другое (доход)"
+
+        def recategorize(row):
+            candidates = []
+            for n, k in cat_list:
+                if n.startswith("Другое"):
+                    continue
+                if _get_type_for(n, cats_df) == row["type"]:
+                    candidates.append((n, k))
+            found = _find_category_by_text(row.get("description", ""), row["type"], candidates)
+            if found:
+                return found
+            return other_exp if row["type"] == "expense" else other_inc
+
+        ops_df["category"] = ops_df.apply(recategorize, axis=1)
+        conn.update(worksheet="transactions", data=ops_df)
+
+
 # ---------- Вспомогательные ----------
 def month_label(year, month):
     months = ["январь", "февраль", "март", "апрель", "май", "июнь",
@@ -184,7 +216,7 @@ def month_label(year, month):
 def available_months(df):
     if df.empty:
         return []
-    dates = pd.to_datetime(df["date"])
+    dates = pd.to_datetime(df["date"], errors="coerce")
     periods = dates.dt.to_period("M").dropna().unique()
     periods = sorted(periods, reverse=True)
     return [(p.year, p.month) for p in periods]
@@ -205,9 +237,12 @@ def fmt_date(iso_date):
 # ============================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
-sync_categories()
-
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
+
+# Синхронизацию вызываем один раз за сессию, чтобы не дёргать Google лишний раз
+if "synced" not in st.session_state:
+    sync_categories()
+    st.session_state.synced = True
 
 st.markdown("""
 <style>
@@ -227,13 +262,22 @@ st.markdown("""
 def page_onboarding():
     st.title("👋 Добро пожаловать в учёт финансов")
     st.markdown("Скажи: **сколько денег у тебя сейчас?** Это будет точкой отсчёта.")
+
     with st.form("onboarding"):
-        initial = st.number_input("Начальная сумма (₽)", min_value=1, step=1000, format="%d", value=None)
-        if st.form_submit_button("Начать учёт", type="primary"):
+        initial = st.number_input(
+            "Начальная сумма (₽)",
+            min_value=1,
+            step=1000,
+            format="%d",
+            value=None
+        )
+        submitted = st.form_submit_button("Начать учёт", type="primary")
+
+        if submitted:
             if initial is None:
                 st.error("Введи начальную сумму")
             else:
-                set_initial_balance(initial)
+                set_initial_balance(int(initial))
                 st.rerun()
 
 
@@ -256,8 +300,11 @@ def page_operations():
         if "form_key" not in st.session_state:
             st.session_state.form_key = 0
 
-        amount = st.number_input("Сумма (₽)", min_value=1, step=10, format="%d", value=None,
-                                  key=f"amount_{st.session_state.form_key}")
+        amount = st.number_input(
+            "Сумма (₽)",
+            min_value=1, step=10, format="%d", value=None,
+            key=f"amount_{st.session_state.form_key}"
+        )
         description = st.text_input("Категория", key=f"desc_{st.session_state.form_key}")
         comment = st.text_input("Комментарий", key=f"comment_{st.session_state.form_key}")
 
@@ -289,10 +336,14 @@ def page_operations():
         st.divider()
         with st.expander("⚙️ Начальный баланс"):
             current_initial = get_initial_balance() or 0
-            new_initial = st.number_input("Начальная сумма (₽)", min_value=0, step=1000, format="%d",
-                                           value=int(current_initial), key="edit_initial")
+            new_initial = st.number_input(
+                "Начальная сумма (₽)",
+                min_value=0, step=1000, format="%d",
+                value=int(current_initial),
+                key="edit_initial"
+            )
             if st.button("Сохранить", use_container_width=True):
-                set_initial_balance(new_initial)
+                set_initial_balance(int(new_initial))
                 st.success("Сохранено")
                 st.rerun()
 
@@ -301,6 +352,9 @@ def page_operations():
     if df.empty:
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
+
+    # Приводим типы
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
 
     initial = get_initial_balance() or 0
     total_income_all = df.loc[df["type"] == "income", "amount"].sum()
@@ -311,7 +365,7 @@ def page_operations():
     st.divider()
 
     months = available_months(df)
-    dates = pd.to_datetime(df["date"])
+    dates = pd.to_datetime(df["date"], errors="coerce")
 
     for idx, (y, m) in enumerate(months):
         mask = (dates.dt.year == y) & (dates.dt.month == m)
