@@ -167,7 +167,7 @@ def add_transaction(d, amount, category_id, cat_type, description, comment):
 def load_transactions():
     with get_conn() as conn:
         return pd.read_sql_query("""
-            SELECT t.id, t.date, t.type, t.amount,
+            SELECT t.date, t.type, t.amount,
                    c.name AS category, t.description, t.comment
             FROM transactions t
             LEFT JOIN categories c ON c.id = t.category_id
@@ -190,50 +190,37 @@ def available_months(df):
 def fmt_money(x):
     return f"{int(x):,}".replace(",", " ")
 
-
-def style_signed_amount(value, tx_type):
-    """Возвращает CSS-стиль для ячейки суммы в зависимости от типа."""
-    if tx_type == "income":
-        return "color: #1a8f3a; font-weight: 600;"  # зелёный
-    else:
-        return "color: #c0392b; font-weight: 600;"  # красный
+def fmt_date(iso_date):
+    try:
+        d = pd.to_datetime(iso_date)
+        return d.strftime("%d.%m.%Y")
+    except Exception:
+        return iso_date
 
 
 def render_transactions_table(df_m):
-    """Рисует таблицу операций без колонки Тип, но с цветными суммами."""
     view = df_m.copy()
+    view["date"] = view["date"].apply(fmt_date)
 
-    # Оставляем нужные колонки
-    view = view[["id", "date", "amount", "category", "description", "comment"]].copy()
-
-    # Заменяем amount на строку со знаком
     def signed(row):
         val = int(row["amount"])
-        sign = "+" if row["type_orig"] == "income" else "−"
+        sign = "+" if row["type"] == "income" else "−"
         return f"{sign}{val:,}".replace(",", " ")
-
-    # Сохраняем оригинальный type отдельно (для стилизации)
-    view["type_orig"] = df_m["type"].values
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    # Переименовываем
+    view = view[["date", "amount_str", "category", "description", "comment"]].copy()
     view = view.rename(columns={
-        "id": "ID", "date": "Дата", "amount_str": "Сумма",
+        "date": "Дата", "amount_str": "Сумма",
         "category": "Категория", "description": "Описание",
         "comment": "Комментарий"
     })
 
-    # Упорядочиваем колонки
-    view = view[["ID", "Дата", "Сумма", "Категория", "Описание", "Комментарий"]]
-
-    # Стилизуем колонку "Сумма" — цвет зависит от типа
     types = df_m["type"].tolist()
     sum_col_idx = view.columns.get_loc("Сумма")
 
     def style_row(row):
         styles = [""] * len(row)
-        # Определяем тип для строки по позиции
         idx = view.index.get_loc(row.name)
         t = types[idx]
         color = "#1a8f3a" if t == "income" else "#c0392b"
@@ -241,7 +228,6 @@ def render_transactions_table(df_m):
         return styles
 
     styled = view.style.apply(style_row, axis=1)
-
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
@@ -252,7 +238,6 @@ init_db()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# ---------- Кастомный CSS ----------
 st.markdown("""
 <style>
     details > summary {
@@ -327,6 +312,12 @@ def page_operations():
 
     cats_df = load_categories()
 
+    # Инициализируем ключи session_state для полей формы
+    # Это нужно, чтобы вручную очищать поля после добавления
+    for k in ("form_amount", "form_description", "form_comment"):
+        if k not in st.session_state:
+            st.session_state[k] = None if k == "form_amount" else ""
+
     with st.sidebar:
         op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
         is_expense = op_type == "Расход"
@@ -335,15 +326,29 @@ def page_operations():
         st.header(f"➕ Добавить {'расход' if is_expense else 'доход'}")
 
         op_date = st.date_input("Дата", value=date.today())
+
+        # number_input: чтобы можно было очистить — используем value из session_state
+        # Streamlit для number_input не позволяет value=None после первого ввода,
+        # поэтому используем костыль: сбрасываем через счётчик
+        if "form_key" not in st.session_state:
+            st.session_state.form_key = 0
+
         amount = st.number_input(
             "Сумма (₽)",
             min_value=1,
             step=10,
             format="%d",
-            value=None
+            value=None,
+            key=f"amount_{st.session_state.form_key}"
         )
-        description = st.text_input("Категория")
-        comment = st.text_input("Комментарий")
+        description = st.text_input(
+            "Категория",
+            key=f"desc_{st.session_state.form_key}"
+        )
+        comment = st.text_input(
+            "Комментарий",
+            key=f"comment_{st.session_state.form_key}"
+        )
 
         matched = None
         if description:
@@ -368,6 +373,8 @@ def page_operations():
             else:
                 cid, cname, _ = matched
                 add_transaction(op_date, amount, cid, cat_type, description, comment)
+                # Меняем ключ — все поля очистятся
+                st.session_state.form_key += 1
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
 
@@ -393,7 +400,6 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
-    # ===== ТЕКУЩИЙ БАЛАНС =====
     initial = get_initial_balance() or 0
     total_income_all = df.loc[df["type"] == "income", "amount"].sum()
     total_expense_all = df.loc[df["type"] == "expense", "amount"].sum()
@@ -403,7 +409,6 @@ def page_operations():
 
     st.divider()
 
-    # ===== СПИСОК МЕСЯЦЕВ =====
     months = available_months(df)
     dates = pd.to_datetime(df["date"])
 
@@ -417,7 +422,6 @@ def page_operations():
 
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
-            # Доходы и расходы за месяц — компактно
             st.markdown(
                 f"""
                 <div class="metrics-row">
@@ -435,8 +439,6 @@ def page_operations():
             )
 
             st.divider()
-
-            # Таблица операций — без колонки Тип, но с цветными суммами
             render_transactions_table(df_m)
 
 
