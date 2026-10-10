@@ -55,7 +55,6 @@ def _cached_read(worksheet, columns):
 
 # ---------- Категории: только чтение ----------
 def _load_categories_df():
-    """Читает категории из таблицы. Если пусто — берёт из кода."""
     df = _cached_read("categories", ["name", "type", "keywords"])
     if df.empty:
         return pd.DataFrame(
@@ -171,6 +170,47 @@ def fmt_date(iso_date):
         return iso_date
 
 
+def render_day_table(day_df):
+    """Рисует мини-таблицу для одного дня.
+    Колонки: Сумма, Категория, Описание, Комментарий.
+    Без None — везде пустые строки, где нет данных."""
+    view = day_df.copy()
+
+    # Форматируем сумму со знаком
+    def signed(row):
+        val = int(row["amount"])
+        sign = "+" if row["type"] == "income" else "−"
+        return f"{sign}{val:,}".replace(",", " ")
+
+    view["amount_str"] = view.apply(signed, axis=1)
+
+    # Заполняем NaN пустыми строками
+    for col in ["category", "description", "comment"]:
+        view[col] = view[col].fillna("").astype(str)
+
+    view = view[["amount_str", "category", "description", "comment"]]
+    view = view.rename(columns={
+        "amount_str": "Сумма",
+        "category": "Категория",
+        "description": "Описание",
+        "comment": "Комментарий",
+    })
+
+    types = day_df["type"].tolist()
+    sum_col_idx = view.columns.get_loc("Сумма")
+
+    def style_row(row):
+        styles = [""] * len(row)
+        i = view.index.get_loc(row.name)
+        t = types[i]
+        color = "#1a8f3a" if t == "income" else "#c0392b"
+        styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
+        return styles
+
+    styled = view.style.apply(style_row, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 # ============================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
@@ -184,6 +224,14 @@ st.markdown("""
     .metric-cell { padding: 0; margin: 0; line-height: 1.15; }
     .mini-metric-label { font-size: 14px; color: #666; margin: 0; padding: 0; }
     .mini-metric-value { font-size: 20px; font-weight: 600; color: #111; margin: 0; padding: 0; }
+    .day-header {
+        font-size: 16px;
+        font-weight: 600;
+        color: #333;
+        margin: 12px 0 6px 0;
+        padding: 4px 0;
+        border-bottom: 1px solid #e5e7eb;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -304,6 +352,7 @@ def page_operations():
         label = f"📅 {month_label(y, m)}"
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
+            # Метрики за месяц
             st.markdown(
                 f"""
                 <div class="metrics-row">
@@ -321,44 +370,31 @@ def page_operations():
             )
             st.divider()
 
-            view = df_m.copy()
-            view["date"] = view["date"].apply(fmt_date)
+            # Группируем по дате — от новых к старым
+            df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
+            unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
 
-            def signed(row):
-                val = int(row["amount"])
-                sign = "+" if row["type"] == "income" else "−"
-                return f"{sign}{val:,}".replace(",", " ")
+            for d in unique_dates:
+                day_df = df_m[df_m["_date_obj"] == d].copy()
 
-            view["amount_str"] = view.apply(signed, axis=1)
-            view = view[["date", "amount_str", "category", "description", "comment"]]
-            view = view.rename(columns={
-                "date": "Дата", "amount_str": "Сумма", "category": "Категория",
-                "description": "Описание", "comment": "Комментарий"
-            })
+                # Заголовок дня
+                st.markdown(
+                    f"<div class='day-header'>📆 {d.strftime('%d.%m.%Y')}</div>",
+                    unsafe_allow_html=True
+                )
 
-            types = df_m["type"].tolist()
-            sum_col_idx = view.columns.get_loc("Сумма")
-
-            def style_row(row):
-                styles = [""] * len(row)
-                idx2 = view.index.get_loc(row.name)
-                t = types[idx2]
-                color = "#1a8f3a" if t == "income" else "#c0392b"
-                styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
-                return styles
-
-            st.dataframe(view.style.apply(style_row, axis=1), use_container_width=True, hide_index=True)
+                # Мини-таблица за день
+                render_day_table(day_df)
 
 
 # ============================================================
-# КАТЕГОРИИ (только просмотр, БЕЗ редактирования)
+# КАТЕГОРИИ (только просмотр)
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
     st.caption(
         "Категории заданы в коде (переменная `DESIRED_CATEGORIES`). "
-        "Чтобы что-то изменить — отредактируй код и перезапусти приложение. "
-        "Редактирование через интерфейс отключено, чтобы не потерять данные."
+        "Чтобы что-то изменить — отредактируй код и перезапусти приложение."
     )
 
     cats_df = _load_categories_df()
