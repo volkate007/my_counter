@@ -70,9 +70,29 @@ def init_db():
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
 
 
+# ---------- Вспомогательное: найти категорию по тексту ----------
+def _find_category_by_text(text, cat_type, categories):
+    """categories — список (id, name, keywords). Ищет по ключам.
+    Возвращает (id, name, kw) или None."""
+    text_lower = text.lower()
+    all_kw = []
+    for cid, cname, kws in categories:
+        if cname.startswith("Другое"):
+            continue
+        for kw in str(kws).split(","):
+            kw = kw.strip()
+            if kw:
+                all_kw.append((len(kw), kw, cid, cname))
+    all_kw.sort(reverse=True)
+    for _, kw, cid, cname in all_kw:
+        if kw in text_lower:
+            return cid, cname, kw
+    return None
+
+
 # ---------- Синхронизация категорий ----------
 def sync_categories():
-    """Приводит категории к DESIRED_CATEGORIES + восстанавливает операции с NULL."""
+    """Приводит категории к DESIRED_CATEGORIES + пересчитывает операции с NULL."""
     with get_conn() as conn:
         # 1) Добавляем или обновляем нужные категории
         for name, t, kws in DESIRED_CATEGORIES:
@@ -93,7 +113,7 @@ def sync_categories():
                 except sqlite3.IntegrityError:
                     pass
 
-        # 2) id «Другое»-категорий (они точно уже есть после шага 1)
+        # 2) id «Другое»-категорий
         def get_id(name):
             row = conn.execute(
                 "SELECT id FROM categories WHERE name = ?", (name,)
@@ -103,33 +123,49 @@ def sync_categories():
         other_expense_id = get_id("Другое (расход)")
         other_income_id = get_id("Другое (доход)")
 
-        # 3) Сначала переназначаем операции ЛИШНИХ категорий на «Другое»,
-        #    потом удаляем сами категории.
-        all_rows = conn.execute("SELECT id, name, type FROM categories").fetchall()
-        for cid, cname, ctype in all_rows:
+        # 3) Удаляем лишние категории, переназначая их операции на NULL
+        #    (потом эти NULL-операции пересчитаем по ключам)
+        all_rows = conn.execute("SELECT id, name FROM categories").fetchall()
+        for cid, cname in all_rows:
             if cname in DESIRED_NAMES:
                 continue
-            target = other_expense_id if ctype == "expense" else other_income_id
-            if target is not None:
-                conn.execute(
-                    "UPDATE transactions SET category_id = ? WHERE category_id = ?",
-                    (target, cid)
-                )
+            # Обнуляем ссылки у операций, чтобы не потерять их
+            conn.execute(
+                "UPDATE transactions SET category_id = NULL WHERE category_id = ?",
+                (cid,)
+            )
             conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
 
-        # 4) Восстанавливаем операции с потерянной категорией (category_id IS NULL)
-        if other_expense_id is not None:
-            conn.execute(
-                "UPDATE transactions SET category_id = ? "
-                "WHERE category_id IS NULL AND type = 'expense'",
-                (other_expense_id,)
-            )
-        if other_income_id is not None:
-            conn.execute(
-                "UPDATE transactions SET category_id = ? "
-                "WHERE category_id IS NULL AND type = 'income'",
-                (other_income_id,)
-            )
+        # 4) Пересчитываем все операции с category_id IS NULL
+        #    Пробуем распознать по ключам, если не вышло — отправляем в «Другое»
+        null_ops = conn.execute(
+            "SELECT id, type, description FROM transactions WHERE category_id IS NULL"
+        ).fetchall()
+
+        # Загружаем все категории (кроме «Другое») с их ключами
+        all_cats = conn.execute(
+            "SELECT id, name, type, keywords FROM categories"
+        ).fetchall()
+
+        for op_id, op_type, op_desc in null_ops:
+            # Категории нужного типа
+            candidates = [
+                (cid, cname, kws)
+                for cid, cname, ctype, kws in all_cats
+                if ctype == op_type
+            ]
+            found = _find_category_by_text(op_desc or "", op_type, candidates)
+
+            if found:
+                target_id = found[0]
+            else:
+                target_id = other_expense_id if op_type == "expense" else other_income_id
+
+            if target_id is not None:
+                conn.execute(
+                    "UPDATE transactions SET category_id = ? WHERE id = ?",
+                    (target_id, op_id)
+                )
 
 
 # ---------- Настройки ----------
