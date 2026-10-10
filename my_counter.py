@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import uuid
-from datetime import date, datetime
+from datetime import date
 from streamlit_gsheets import GSheetsConnection
 
 # ============================================================
@@ -20,6 +20,7 @@ DESIRED_CATEGORIES = [
 ]
 
 CACHE_TTL = 30
+TX_COLUMNS = ["id", "date", "type", "amount", "category", "description", "comment"]
 
 
 # ============================================================
@@ -66,24 +67,51 @@ def _load_categories_df():
 # ============================================================
 # ТРАНЗАКЦИИ
 # ============================================================
-TX_COLUMNS = ["id", "date", "type", "amount", "category", "description", "comment"]
-
-
-def _load_transactions_df():
-    df = _cached_read("transactions", TX_COLUMNS)
-    # Если в таблице нет колонки id (старые данные) — сгенерим
-    if "id" not in df.columns or df["id"].astype(str).str.strip().eq("").all():
-        df["id"] = ""
-    return df
-
-
 def _write_transactions_df(df):
-    """Полностью перезаписывает лист transactions."""
     conn = get_conn()
     df = df[TX_COLUMNS].copy()
     df = df.fillna("")
     conn.update(worksheet="transactions", data=df)
     conn.clear()
+
+
+def _ensure_ids(df):
+    """Проверяет, что у каждой строки есть уникальный id.
+    Если нет — генерирует и сохраняет обратно. Возвращает исправленный df."""
+    if df.empty:
+        return df
+
+    # Пустые id
+    empty_mask = df["id"].isna() | (df["id"].astype(str).str.strip() == "")
+    # Дубликаты
+    dup_mask = df["id"].astype(str).duplicated(keep=False) & ~empty_mask
+
+    needs_fix = empty_mask.any() or dup_mask.any()
+
+    if not needs_fix:
+        return df
+
+    # Заполняем пустые
+    for i in df.index[empty_mask]:
+        df.at[i, "id"] = str(uuid.uuid4())[:8]
+
+    # Исправляем дубликаты
+    seen = set()
+    for i in df.index:
+        cur = str(df.at[i, "id"])
+        if cur in seen:
+            df.at[i, "id"] = str(uuid.uuid4())[:8]
+        seen.add(str(df.at[i, "id"]))
+
+    # Сохраняем обратно в таблицу
+    _write_transactions_df(df)
+    return df
+
+
+def _load_transactions_df():
+    df = _cached_read("transactions", TX_COLUMNS)
+    df = _ensure_ids(df)
+    return df
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
@@ -198,14 +226,6 @@ def fmt_money(x):
     return f"{int(x):,}".replace(",", " ")
 
 
-def fmt_date(iso_date):
-    try:
-        d = pd.to_datetime(iso_date)
-        return d.strftime("%d.%m.%Y")
-    except Exception:
-        return iso_date
-
-
 # ============================================================
 # ДИАЛОГ РЕДАКТИРОВАНИЯ
 # ============================================================
@@ -222,15 +242,22 @@ def edit_dialog(tx):
         d_val = date.today()
 
     new_date = st.date_input("Дата", value=d_val)
+
+    try:
+        amount_val = int(float(tx["amount"]))
+        if amount_val <= 0:
+            amount_val = 1
+    except Exception:
+        amount_val = 1
+
     new_amount = st.number_input(
         "Сумма (₽)",
         min_value=1, step=10, format="%d",
-        value=int(float(tx["amount"])) if str(tx["amount"]).strip() else 1
+        value=amount_val
     )
     new_description = st.text_input("Категория", value=str(tx.get("description", "") or ""))
     new_comment = st.text_input("Комментарий", value=str(tx.get("comment", "") or ""))
 
-    # Автоподстановка категории
     matched_name, matched_kw = None, None
     if new_description:
         matched_name, matched_kw = match_category(new_description, cats_df, cat_type)
@@ -316,8 +343,8 @@ def page_onboarding():
 # СПИСОК ОПЕРАЦИЙ ЗА ДЕНЬ
 # ============================================================
 def render_day_list(day_df):
-    """Рисует список операций за день с кнопками редактирования и удаления."""
     for _, tx in day_df.iterrows():
+        tx_id = str(tx["id"])
         c_amount, c_cat, c_desc, c_comm, c_edit, c_del = st.columns([1.5, 2, 3, 3, 0.5, 0.5])
 
         amount = int(tx["amount"])
@@ -342,12 +369,11 @@ def render_day_list(day_df):
             unsafe_allow_html=True
         )
 
-        # Кнопки действий
-        if c_edit.button("✏️", key=f"edit_{tx['id']}", help="Редактировать"):
+        if c_edit.button("✏️", key=f"edit_{tx_id}", help="Редактировать"):
             edit_dialog(tx)
 
-        if c_del.button("🗑️", key=f"del_{tx['id']}", help="Удалить"):
-            _delete_transaction(tx["id"])
+        if c_del.button("🗑️", key=f"del_{tx_id}", help="Удалить"):
+            _delete_transaction(tx_id)
             st.rerun()
 
 
