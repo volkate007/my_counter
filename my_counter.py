@@ -122,7 +122,7 @@ def set_initial_balance(amount):
 
 # ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
-    text_lower = text.lower()
+    text_lower = (text or "").lower()
     all_kw = []
     for _, row in cats_df.iterrows():
         if str(row["name"]).startswith("Другое") or row["type"] != cat_type:
@@ -168,14 +168,11 @@ def fmt_date(iso_date):
 
 def render_day_table(day_df):
     """Рисует таблицу операций за один день.
-    Колонки: Дата | Сумма | Категория | Описание | Комментарий.
-    Сумма — цветная, со знаком. Пустые ячейки — не None, а пустая строка."""
+    Колонки: Дата | Сумма | Категория | Описание | Комментарий."""
     view = day_df.copy().reset_index(drop=True)
 
-    # Форматируем дату
     view["date_str"] = view["date"].apply(fmt_date)
 
-    # Форматируем сумму со знаком
     def signed(row):
         val = int(row["amount"])
         sign = "+" if row["type"] == "income" else "−"
@@ -183,7 +180,7 @@ def render_day_table(day_df):
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    # Убираем None в текстовых колонках
+    # Пустые значения — пустая строка
     for col in ["category", "description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
@@ -285,6 +282,7 @@ def page_operations():
         description = st.text_input("Категория", key=f"desc_{st.session_state.form_key}")
         comment = st.text_input("Комментарий", key=f"comment_{st.session_state.form_key}")
 
+        # Живая подсказка категории (регистр не важен)
         matched_name, matched_kw = None, None
         if description:
             matched_name, matched_kw = match_category(description, cats_df, cat_type)
@@ -303,11 +301,21 @@ def page_operations():
             elif not description.strip():
                 st.error("Введи категорию")
             else:
-                if not matched_name:
-                    matched_name = "Другое (расход)" if is_expense else "Другое (доход)"
-                _append_transaction(op_date, amount, matched_name, cat_type, description, comment)
+                # Приводим ввод к нижнему регистру
+                description_clean = description.strip().lower()
+                comment_clean = comment.strip().lower()
+
+                # Пересчитываем категорию уже по очищенному тексту
+                matched_name_final, _ = match_category(description_clean, cats_df, cat_type)
+                if not matched_name_final:
+                    matched_name_final = "Другое (расход)" if is_expense else "Другое (доход)"
+
+                _append_transaction(
+                    op_date, amount, matched_name_final, cat_type,
+                    description_clean, comment_clean
+                )
                 st.session_state.form_key += 1
-                st.success(f"Добавлено: {amount} ₽ — {matched_name}")
+                st.success(f"Добавлено: {amount} ₽ — {matched_name_final}")
                 st.rerun()
 
         st.divider()
