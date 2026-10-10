@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import date
 from streamlit_gsheets import GSheetsConnection
 
 # ============================================================
 # КАТЕГОРИИ — ИСТОЧНИК ПРАВДЫ
 # ============================================================
-# Редактируй этот список, чтобы изменить категории.
-# При каждом перезапуске приложения он записывается в Google Sheets.
 DESIRED_CATEGORIES = [
     ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
     ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
@@ -24,15 +24,99 @@ CACHE_TTL = 30
 
 
 # ============================================================
-# ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS
+# ПРЯМОЕ ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ЧЕРЕЗ GSPREAD
+# ============================================================
+@st.cache_resource
+def get_gsheets_client():
+    """Клиент gspread с тем же service account, что в secrets."""
+    secrets_dict = dict(st.secrets["connections"]["gsheets"])
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(secrets_dict, scopes=scopes)
+    return gspread.authorize(creds)
+
+
+@st.cache_resource
+def get_spreadsheet():
+    """Открывает саму таблицу."""
+    secrets_dict = dict(st.secrets["connections"]["gsheets"])
+    url = secrets_dict["spreadsheet"]
+    client = get_gsheets_client()
+    return client.open_by_url(url)
+
+
+# ============================================================
+# ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS (для transactions и settings)
 # ============================================================
 @st.cache_resource
 def get_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
 
+# ============================================================
+# КАТЕГОРИИ — через gspread напрямую
+# ============================================================
+def write_categories_from_code():
+    """Записывает DESIRED_CATEGORIES в лист categories. Создаёт лист, если нужно.
+    Полностью перезаписывает содержимое."""
+    try:
+        sh = get_spreadsheet()
+        try:
+            ws = sh.worksheet("categories")
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title="categories", rows=50, cols=3)
+
+        # Формируем данные: заголовки + строки
+        data = [["name", "type", "keywords"]]
+        for name, t, kws in DESIRED_CATEGORIES:
+            data.append([name, t, kws])
+
+        # Полностью очищаем и записываем
+        ws.clear()
+        ws.update(data, "A1")
+        return True
+    except Exception as e:
+        st.session_state["cat_write_error"] = str(e)
+        return False
+
+
+def read_categories():
+    """Читает категории из листа categories через gspread."""
+    try:
+        sh = get_spreadsheet()
+        ws = sh.worksheet("categories")
+        rows = ws.get_all_values()
+        if not rows or len(rows) < 2:
+            return pd.DataFrame(columns=["name", "type", "keywords"])
+        header = rows[0]
+        data = rows[1:]
+        df = pd.DataFrame(data, columns=header[:len(data[0])] if data else header)
+        # Обрезаем до нужных колонок
+        for col in ["name", "type", "keywords"]:
+            if col not in df.columns:
+                df[col] = ""
+        return df[["name", "type", "keywords"]]
+    except Exception as e:
+        st.session_state["cat_read_error"] = str(e)
+        return pd.DataFrame(columns=["name", "type", "keywords"])
+
+
+def _load_categories_df():
+    """Читает категории через gspread. Если пусто — возвращает из кода."""
+    df = read_categories()
+    if df.empty:
+        return pd.DataFrame(
+            [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
+        )
+    return df
+
+
+# ============================================================
+# ТРАНЗАКЦИИ — через streamlit-gsheets
+# ============================================================
 def _fresh_read(worksheet, columns):
-    """Читает лист напрямую, без кэша."""
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=0)
     if df.empty:
@@ -45,7 +129,6 @@ def _fresh_read(worksheet, columns):
 
 
 def _cached_read(worksheet, columns):
-    """Читает лист с кэшем — для отображения."""
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=CACHE_TTL)
     if df.empty:
@@ -57,45 +140,16 @@ def _cached_read(worksheet, columns):
     return df
 
 
-def _load_categories_df():
-    """Читает категории из таблицы. Если пусто — возвращает из кода."""
-    df = _cached_read("categories", ["name", "type", "keywords"])
-    if df.empty:
-        return pd.DataFrame(
-            [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
-        )
-    return df
-
-
 def _load_transactions_df():
     return _cached_read("transactions", ["date", "type", "amount", "category", "description", "comment"])
 
 
-def _write_categories_from_code():
-    """Записывает категории из DESIRED_CATEGORIES в Google Sheets.
-    Полностью перезаписывает лист categories."""
-    conn = get_conn()
-    df = pd.DataFrame(
-        [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
-    )
-    try:
-        conn.update(worksheet="categories", data=df)
-        conn.clear()
-    except Exception as e:
-        # Если 429 или другая ошибка — молча продолжаем
-        # Категории всё равно доступны из кода через _load_categories_df
-        pass
-
-
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
-    """Читает свежие данные, добавляет строку, пишет всё обратно."""
     conn = get_conn()
-
     existing = _fresh_read(
         "transactions",
         ["date", "type", "amount", "category", "description", "comment"]
     )
-
     new_row = pd.DataFrame([{
         "date": d.isoformat(),
         "type": cat_type,
@@ -109,7 +163,9 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
     conn.clear()
 
 
-# ---------- Настройки ----------
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
 def get_setting(key, default=None):
     df = _cached_read("settings", ["key", "value"])
     if df.empty:
@@ -121,19 +177,13 @@ def get_setting(key, default=None):
 def set_setting(key, value):
     conn = get_conn()
     df = _fresh_read("settings", ["key", "value"])
-
     df["key"] = df["key"].astype(str)
     df["value"] = df["value"].astype(str)
-
     mask = df["key"] == str(key)
     if mask.any():
         df.loc[mask, "value"] = str(value)
     else:
-        df = pd.concat(
-            [df, pd.DataFrame([{"key": str(key), "value": str(value)}])],
-            ignore_index=True
-        )
-
+        df = pd.concat([df, pd.DataFrame([{"key": str(key), "value": str(value)}])], ignore_index=True)
     conn.update(worksheet="settings", data=df)
     conn.clear()
 
@@ -152,12 +202,14 @@ def set_initial_balance(amount):
     set_setting("initial_balance", str(int(amount)))
 
 
-# ---------- Распознавание категорий ----------
+# ============================================================
+# РАСПОЗНАВАНИЕ
+# ============================================================
 def match_category(text, cats_df, cat_type):
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df.iterrows():
-        if row["name"].startswith("Другое") or row["type"] != cat_type:
+        if str(row["name"]).startswith("Другое") or row["type"] != cat_type:
             continue
         for kw in str(row["keywords"]).split(","):
             kw = kw.strip()
@@ -170,7 +222,9 @@ def match_category(text, cats_df, cat_type):
     return None, None
 
 
-# ---------- Вспомогательные ----------
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ
+# ============================================================
 def month_label(year, month):
     months = ["январь", "февраль", "март", "апрель", "май", "июнь",
               "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
@@ -203,9 +257,9 @@ def fmt_date(iso_date):
 # ============================================================
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# Один раз за сессию записываем категории из кода в таблицу
+# Один раз за сессию — записываем категории из кода в таблицу
 if "categories_synced" not in st.session_state:
-    _write_categories_from_code()
+    write_categories_from_code()
     st.session_state.categories_synced = True
 
 st.markdown("""
@@ -221,7 +275,7 @@ st.markdown("""
 
 
 # ============================================================
-# ЭКРАН ПЕРВОГО ЗАПУСКА
+# ОНБОРДИНГ
 # ============================================================
 def page_onboarding():
     st.title("👋 Добро пожаловать в учёт финансов")
@@ -243,7 +297,7 @@ def page_onboarding():
 
 
 # ============================================================
-# СТРАНИЦА: ОПЕРАЦИИ
+# ОПЕРАЦИИ
 # ============================================================
 def page_operations():
     st.markdown("### 💰 Учёт доходов и расходов")
@@ -383,7 +437,7 @@ def page_operations():
 
 
 # ============================================================
-# СТРАНИЦА: КАТЕГОРИИ (только просмотр)
+# КАТЕГОРИИ (просмотр)
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
@@ -391,6 +445,12 @@ def page_categories():
         "Категории задаются в коде приложения (переменная `DESIRED_CATEGORIES`). "
         "Чтобы изменить список — отредактируй код и перезапусти приложение."
     )
+
+    # Показать ошибки, если были
+    if "cat_write_error" in st.session_state:
+        st.error(f"Ошибка записи в Google Sheets: {st.session_state['cat_write_error']}")
+    if "cat_read_error" in st.session_state:
+        st.warning(f"Ошибка чтения: {st.session_state['cat_read_error']}")
 
     cats_df = _load_categories_df()
 
@@ -415,7 +475,7 @@ def page_categories():
 
 
 # ============================================================
-# НАВИГАЦИЯ (МЕНЮ)
+# НАВИГАЦИЯ
 # ============================================================
 if get_initial_balance() is None:
     page_onboarding()
