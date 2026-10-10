@@ -72,10 +72,9 @@ def init_db():
 
 # ---------- Синхронизация категорий ----------
 def sync_categories():
-    """Полная синхронизация: обновляет название/тип/ключи у существующих,
-    добавляет недостающие, удаляет лишние с переназначением операций на 'Другое'."""
+    """Приводит категории к DESIRED_CATEGORIES + восстанавливает операции с NULL."""
     with get_conn() as conn:
-        # 1) Добавляем или обновляем
+        # 1) Добавляем или обновляем нужные категории
         for name, t, kws in DESIRED_CATEGORIES:
             row = conn.execute(
                 "SELECT id FROM categories WHERE name = ?", (name,)
@@ -94,7 +93,7 @@ def sync_categories():
                 except sqlite3.IntegrityError:
                     pass
 
-        # 2) id категорий «Другое»
+        # 2) id «Другое»-категорий (они точно уже есть после шага 1)
         def get_id(name):
             row = conn.execute(
                 "SELECT id FROM categories WHERE name = ?", (name,)
@@ -104,7 +103,8 @@ def sync_categories():
         other_expense_id = get_id("Другое (расход)")
         other_income_id = get_id("Другое (доход)")
 
-        # 3) Удаляем лишние
+        # 3) Сначала переназначаем операции ЛИШНИХ категорий на «Другое»,
+        #    потом удаляем сами категории.
         all_rows = conn.execute("SELECT id, name, type FROM categories").fetchall()
         for cid, cname, ctype in all_rows:
             if cname in DESIRED_NAMES:
@@ -115,12 +115,21 @@ def sync_categories():
                     "UPDATE transactions SET category_id = ? WHERE category_id = ?",
                     (target, cid)
                 )
-            else:
-                conn.execute(
-                    "UPDATE transactions SET category_id = NULL WHERE category_id = ?",
-                    (cid,)
-                )
             conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
+
+        # 4) Восстанавливаем операции с потерянной категорией (category_id IS NULL)
+        if other_expense_id is not None:
+            conn.execute(
+                "UPDATE transactions SET category_id = ? "
+                "WHERE category_id IS NULL AND type = 'expense'",
+                (other_expense_id,)
+            )
+        if other_income_id is not None:
+            conn.execute(
+                "UPDATE transactions SET category_id = ? "
+                "WHERE category_id IS NULL AND type = 'income'",
+                (other_income_id,)
+            )
 
 
 # ---------- Настройки ----------
