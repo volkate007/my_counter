@@ -58,12 +58,18 @@ def init_db():
         cur = conn.execute("SELECT COUNT(*) FROM categories")
         if cur.fetchone()[0] == 0:
             default_categories = [
-                ("Продукты",    "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия"),
-                ("Маркетплейс", "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
-                ("Транспорт",   "expense", "проездной,тройка,стрелка,метро,автобус"),
-                ("Спорт", "expense", "соревнования,семинар,аттестация"),
-                ("Зарплата",    "income",  "100б,судейство"),
-                ("Переводы",     "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от Кирилла,от бабушки Л."),
+                # --- Расходы ---
+                ("Продукты",     "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
+                ("Маркетплейс",  "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
+                ("Еда",          "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
+                ("Транспорт",    "expense", "проездной,тройка,стрелка,метро,автобус"),
+                ("Спорт",        "expense", "соревнования,семинар,аттестация"),
+                # --- Доходы ---
+                ("Зарплата",     "income",  "100б,судейство,зарплата,аванс,зп"),
+                ("Переводы",     "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
+                # --- Fallback ---
+                ("Другое (расход)", "expense", ""),
+                ("Другое (доход)",  "income",  ""),
             ]
             conn.executemany(
                 "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
@@ -134,10 +140,25 @@ def remove_keyword(cat_id, kw):
         kws.remove(kw)
         save_keywords(cat_id, kws)
 
+
+def get_other_category(cat_type):
+    """Возвращает (id, name) для fallback-категории 'Другое' нужного типа."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM categories WHERE type = ? AND name LIKE 'Другое%' LIMIT 1",
+            (cat_type,)
+        ).fetchone()
+    return row if row else (None, "Другое")
+
+
 def match_category(text, cats_df, cat_type):
+    """Ищет категорию по ключевым словам. Если не находит — возвращает 'Другое'."""
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
+        # Пропускаем категорию «Другое» при поиске по ключам
+        if row["name"].startswith("Другое"):
+            continue
         for kw in str(row["keywords"]).split(","):
             kw = kw.strip()
             if kw:
@@ -147,7 +168,10 @@ def match_category(text, cats_df, cat_type):
     for _, kw, cid, cname in all_kw:
         if kw in text_lower:
             return cid, cname, kw
-    return None
+
+    # Fallback — «Другое»
+    other_id, other_name = get_other_category(cat_type)
+    return other_id, other_name, None
 
 
 # ---------- Транзакции ----------
@@ -307,12 +331,6 @@ def page_operations():
 
     cats_df = load_categories()
 
-    # Инициализируем ключи session_state для полей формы
-    # Это нужно, чтобы вручную очищать поля после добавления
-    for k in ("form_amount", "form_description", "form_comment"):
-        if k not in st.session_state:
-            st.session_state[k] = None if k == "form_amount" else ""
-
     with st.sidebar:
         op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
         is_expense = op_type == "Расход"
@@ -322,9 +340,6 @@ def page_operations():
 
         op_date = st.date_input("Дата", value=date.today())
 
-        # number_input: чтобы можно было очистить — используем value из session_state
-        # Streamlit для number_input не позволяет value=None после первого ввода,
-        # поэтому используем костыль: сбрасываем через счётчик
         if "form_key" not in st.session_state:
             st.session_state.form_key = 0
 
@@ -348,27 +363,25 @@ def page_operations():
         matched = None
         if description:
             matched = match_category(description, cats_df, cat_type)
-
-        if matched:
-            cid, cname, kw = matched
-            st.success(f"Категория: **{cname}** (по слову «{kw}»)")
-        elif description:
-            st.warning("⚠️ Категория не распознана")
+            if matched:
+                cid, cname, kw = matched
+                if kw:
+                    st.success(f"Категория: **{cname}** (по слову «{kw}»)")
+                else:
+                    st.info(f"Категория: **{cname}** (слово не распознано)")
 
         if st.button("Добавить", type="primary", use_container_width=True):
             if amount is None:
                 st.error("Введи сумму")
             elif not description.strip():
                 st.error("Введи категорию")
-            elif not matched:
-                st.error(
-                    "Не удалось определить категорию. "
-                    "Добавь нужное слово в разделе «🏷️ Категории»."
-                )
             else:
-                cid, cname, _ = matched
+                if matched:
+                    cid, cname, _ = matched
+                else:
+                    cid, cname = get_other_category(cat_type)
+
                 add_transaction(op_date, amount, cid, cat_type, description, comment)
-                # Меняем ключ — все поля очистятся
                 st.session_state.form_key += 1
                 st.success(f"Добавлено: {amount} ₽ — {cname}")
                 st.rerun()
