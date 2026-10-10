@@ -3,7 +3,11 @@ import pandas as pd
 from datetime import date
 from streamlit_gsheets import GSheetsConnection
 
-# ---------- Список «правильных» категорий ----------
+# ============================================================
+# КАТЕГОРИИ — ИСТОЧНИК ПРАВДЫ
+# ============================================================
+# Редактируй этот список, чтобы изменить категории.
+# При каждом перезапуске приложения он записывается в Google Sheets.
 DESIRED_CATEGORIES = [
     ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
     ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
@@ -15,7 +19,6 @@ DESIRED_CATEGORIES = [
     ("Другое (расход)", "expense", ""),
     ("Другое (доход)",  "income",  ""),
 ]
-DESIRED_NAMES = {c[0] for c in DESIRED_CATEGORIES}
 
 CACHE_TTL = 30
 
@@ -29,7 +32,7 @@ def get_conn():
 
 
 def _fresh_read(worksheet, columns):
-    """Читает лист НАПРЯМУЮ, без кэша. Используется перед любой записью."""
+    """Читает лист напрямую, без кэша."""
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=0)
     if df.empty:
@@ -42,7 +45,7 @@ def _fresh_read(worksheet, columns):
 
 
 def _cached_read(worksheet, columns):
-    """Читает лист с кэшем. Используется для отображения."""
+    """Читает лист с кэшем — для отображения."""
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=CACHE_TTL)
     if df.empty:
@@ -55,22 +58,37 @@ def _cached_read(worksheet, columns):
 
 
 def _load_categories_df():
-    return _cached_read("categories", ["name", "type", "keywords"])
+    """Читает категории из таблицы. Если пусто — возвращает из кода."""
+    df = _cached_read("categories", ["name", "type", "keywords"])
+    if df.empty:
+        return pd.DataFrame(
+            [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
+        )
+    return df
 
 
 def _load_transactions_df():
     return _cached_read("transactions", ["date", "type", "amount", "category", "description", "comment"])
 
 
-def _save_categories_df(df):
-    """Сохраняет категории. Если лист в порядке — только дописывает недостающие."""
+def _write_categories_from_code():
+    """Записывает категории из DESIRED_CATEGORIES в Google Sheets.
+    Полностью перезаписывает лист categories."""
     conn = get_conn()
-    conn.update(worksheet="categories", data=df)
-    conn.clear()
+    df = pd.DataFrame(
+        [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
+    )
+    try:
+        conn.update(worksheet="categories", data=df)
+        conn.clear()
+    except Exception as e:
+        # Если 429 или другая ошибка — молча продолжаем
+        # Категории всё равно доступны из кода через _load_categories_df
+        pass
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
-    """Читает СВЕЖИЕ данные, добавляет строку, пишет всё обратно."""
+    """Читает свежие данные, добавляет строку, пишет всё обратно."""
     conn = get_conn()
 
     existing = _fresh_read(
@@ -134,29 +152,7 @@ def set_initial_balance(amount):
     set_setting("initial_balance", str(int(amount)))
 
 
-# ---------- Синхронизация категорий ----------
-def _find_category_by_text(text, categories):
-    text_lower = (text or "").lower()
-    all_kw = []
-    for cname, kws in categories:
-        if cname.startswith("Другое"):
-            continue
-        for kw in str(kws).split(","):
-            kw = kw.strip()
-            if kw:
-                all_kw.append((len(kw), kw, cname))
-    all_kw.sort(reverse=True)
-    for _, kw, cname in all_kw:
-        if kw in text_lower:
-            return cname
-    return None
-
-
-def _get_type_for(name, cats_df):
-    row = cats_df[cats_df["name"] == name]
-    return row.iloc[0]["type"] if not row.empty else None
-
-
+# ---------- Распознавание категорий ----------
 def match_category(text, cats_df, cat_type):
     text_lower = text.lower()
     all_kw = []
@@ -172,58 +168,6 @@ def match_category(text, cats_df, cat_type):
         if kw in text_lower:
             return cname, kw
     return None, None
-
-
-def sync_categories():
-    """Проверяет, что в categories есть все нужные категории.
-    НИЧЕГО не удаляет и не перезаписывает без нужды.
-    Если чтение упало — не делает ничего."""
-    conn = get_conn()
-
-    try:
-        cats_df = conn.read(worksheet="categories", ttl=0)
-    except Exception:
-        # Ошибка чтения (429 и т.п.) — не трогаем лист, чтобы не стереть данные
-        return
-
-    # Проверяем, что структура правильная
-    is_broken = (
-        cats_df.empty
-        or "name" not in cats_df.columns
-        or "type" not in cats_df.columns
-        or "keywords" not in cats_df.columns
-    )
-
-    if is_broken:
-        # Лист пустой или сломан — пересоздаём с дефолтами
-        new_df = pd.DataFrame([
-            {"name": n, "type": t, "keywords": k}
-            for n, t, k in DESIRED_CATEGORIES
-        ])
-        try:
-            conn.update(worksheet="categories", data=new_df)
-            conn.clear()
-        except Exception:
-            pass
-        return
-
-    # Лист в порядке — проверяем, все ли нужные категории на месте
-    cats_df = cats_df.dropna(how="all").reset_index(drop=True)
-    existing = set(cats_df["name"].astype(str))
-
-    missing = [c for c in DESIRED_CATEGORIES if c[0] not in existing]
-
-    if missing:
-        rows_to_add = pd.DataFrame([
-            {"name": n, "type": t, "keywords": k}
-            for n, t, k in missing
-        ])
-        combined = pd.concat([cats_df, rows_to_add], ignore_index=True)
-        try:
-            conn.update(worksheet="categories", data=combined)
-            conn.clear()
-        except Exception:
-            pass
 
 
 # ---------- Вспомогательные ----------
@@ -259,10 +203,10 @@ def fmt_date(iso_date):
 # ============================================================
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# Синхронизация — только если её ещё не было в этой сессии
-if "synced" not in st.session_state:
-    sync_categories()
-    st.session_state.synced = True
+# Один раз за сессию записываем категории из кода в таблицу
+if "categories_synced" not in st.session_state:
+    _write_categories_from_code()
+    st.session_state.categories_synced = True
 
 st.markdown("""
 <style>
@@ -439,74 +383,35 @@ def page_operations():
 
 
 # ============================================================
-# СТРАНИЦА: КАТЕГОРИИ
+# СТРАНИЦА: КАТЕГОРИИ (только просмотр)
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
-    st.caption("Если в операции встретится одно из ключевых слов — она попадёт в эту категорию.")
+    st.caption(
+        "Категории задаются в коде приложения (переменная `DESIRED_CATEGORIES`). "
+        "Чтобы изменить список — отредактируй код и перезапусти приложение."
+    )
 
     cats_df = _load_categories_df()
 
-    with st.expander("➕ Добавить категорию"):
-        with st.form("add_cat", clear_on_submit=True):
-            new_name = st.text_input("Название")
-            new_type = st.radio("Тип", ["Расход", "Доход"], horizontal=True)
-            if st.form_submit_button("Создать"):
-                if not new_name.strip():
-                    st.error("Введи название")
-                else:
-                    fresh = _fresh_read("categories", ["name", "type", "keywords"])
-                    fresh = pd.concat([fresh, pd.DataFrame([{
-                        "name": new_name.strip(),
-                        "type": "expense" if new_type == "Расход" else "income",
-                        "keywords": ""
-                    }])], ignore_index=True)
-                    _save_categories_df(fresh)
-                    st.success(f"Категория «{new_name}» добавлена")
-                    st.rerun()
-
-    st.subheader("Существующие категории")
+    if cats_df.empty:
+        st.warning("Категории не найдены.")
+        return
 
     for _, row in cats_df.iterrows():
         emoji = "💸" if row["type"] == "expense" else "💵"
         kws = [kw.strip() for kw in str(row["keywords"]).split(",") if kw.strip()]
 
         with st.expander(f"{emoji} {row['name']}  ·  {len(kws)} слов"):
-            st.markdown("**Ключевые слова**")
             if not kws:
-                st.caption("Пока нет ключевых слов — добавь ниже.")
+                st.caption("Нет ключевых слов.")
             else:
                 for kw in kws:
-                    c1, c2 = st.columns([10, 1])
-                    c1.markdown(
+                    st.markdown(
                         f"<div style='padding:4px 10px; background:#f0f2f6; "
-                        f"border-radius:8px; display:inline-block'>{kw}</div>",
+                        f"border-radius:8px; display:inline-block; margin:2px 0'>{kw}</div>",
                         unsafe_allow_html=True
                     )
-                    if c2.button("🗑️", key=f"delkw_{row['name']}_{kw}"):
-                        fresh = _fresh_read("categories", ["name", "type", "keywords"])
-                        new_kws = [k for k in kws if k != kw]
-                        fresh.loc[fresh["name"] == row["name"], "keywords"] = ",".join(new_kws)
-                        _save_categories_df(fresh)
-                        st.rerun()
-
-            with st.form(f"addkw_{row['name']}", clear_on_submit=True):
-                c1, c2 = st.columns([4, 1])
-                new_kw = c1.text_input("Новое ключевое слово", label_visibility="collapsed")
-                if c2.form_submit_button("➕ Добавить", use_container_width=True):
-                    if new_kw.strip() and new_kw.strip().lower() not in kws:
-                        fresh = _fresh_read("categories", ["name", "type", "keywords"])
-                        kws.append(new_kw.strip().lower())
-                        fresh.loc[fresh["name"] == row["name"], "keywords"] = ",".join(kws)
-                        _save_categories_df(fresh)
-                        st.rerun()
-
-            st.divider()
-            if st.button("🗑️ Удалить категорию", key=f"delcat_{row['name']}"):
-                fresh = _fresh_read("categories", ["name", "type", "keywords"])
-                fresh = fresh[fresh["name"] != row["name"]].reset_index(drop=True)
-                _save_categories_df(fresh)
-                st.rerun()
 
 
 # ============================================================
