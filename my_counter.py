@@ -55,26 +55,40 @@ def init_db():
         if "comment" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT")
 
-        cur = conn.execute("SELECT COUNT(*) FROM categories")
-        if cur.fetchone()[0] == 0:
-            default_categories = [
-                # --- Расходы ---
-                ("Продукты",     "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
-                ("Маркетплейс",  "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
-                ("Еда",          "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
-                ("Транспорт",    "expense", "проездной,тройка,стрелка,метро,автобус"),
-                ("Спорт",        "expense", "соревнования,семинар,аттестация"),
-                # --- Доходы ---
-                ("Зарплата",     "income",  "100б,судейство,зарплата,аванс,зп"),
-                ("Переводы",     "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
-                # --- Fallback ---
-                ("Другое (расход)", "expense", ""),
-                ("Другое (доход)",  "income",  ""),
-            ]
-            conn.executemany(
-                "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
-                default_categories
-            )
+
+# ---------- Миграция дефолтных категорий ----------
+def migrate_categories():
+    """Добавляет недостающие дефолтные категории.
+    Ключевые слова у существующих категорий НЕ трогает —
+    чтобы не затирать ручные правки пользователя."""
+    desired = [
+        # --- Расходы ---
+        ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
+        ("Маркетплейс",     "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
+        ("Еда",             "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
+        ("Транспорт",       "expense", "проездной,тройка,стрелка,метро,автобус"),
+        ("Спорт",           "expense", "соревнования,семинар,аттестация"),
+        # --- Доходы ---
+        ("Зарплата",        "income",  "100б,судейство,зарплата,аванс,зп"),
+        ("Переводы",        "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
+        # --- Fallback ---
+        ("Другое (расход)", "expense", ""),
+        ("Другое (доход)",  "income",  ""),
+    ]
+    with get_conn() as conn:
+        existing = {row[0] for row in conn.execute("SELECT name FROM categories").fetchall()}
+        added = []
+        for name, t, kws in desired:
+            if name not in existing:
+                try:
+                    conn.execute(
+                        "INSERT INTO categories (name, type, keywords) VALUES (?, ?, ?)",
+                        (name, t, kws)
+                    )
+                    added.append(name)
+                except sqlite3.IntegrityError:
+                    pass
+    return added
 
 
 # ---------- Настройки ----------
@@ -156,7 +170,6 @@ def match_category(text, cats_df, cat_type):
     text_lower = text.lower()
     all_kw = []
     for _, row in cats_df[cats_df["type"] == cat_type].iterrows():
-        # Пропускаем категорию «Другое» при поиске по ключам
         if row["name"].startswith("Другое"):
             continue
         for kw in str(row["keywords"]).split(","):
@@ -169,7 +182,6 @@ def match_category(text, cats_df, cat_type):
         if kw in text_lower:
             return cid, cname, kw
 
-    # Fallback — «Другое»
     other_id, other_name = get_other_category(cat_type)
     return other_id, other_name, None
 
@@ -254,6 +266,7 @@ def render_transactions_table(df_m):
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
 init_db()
+migrate_categories()
 
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
