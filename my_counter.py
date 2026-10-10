@@ -17,6 +17,11 @@ DESIRED_CATEGORIES = [
 ]
 DESIRED_NAMES = {c[0] for c in DESIRED_CATEGORIES}
 
+# TTL кэша чтения из Google Sheets (в секундах).
+# Меньше — свежее данные, но больше запросов к API.
+# 60 секунд — баланс между свежестью и лимитами.
+CACHE_TTL = 60
+
 
 # ============================================================
 # ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS
@@ -26,28 +31,35 @@ def get_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
 
-def _load_categories_df():
+def _invalidate_cache():
+    """Сбрасывает кэш чтения, чтобы следующий read пошёл в Google."""
+    get_conn().clear()
+
+
+def _read_sheet(worksheet, columns):
     conn = get_conn()
-    df = conn.read(worksheet="categories", ttl=0)
+    df = conn.read(worksheet=worksheet, ttl=CACHE_TTL)
     if df.empty:
-        return pd.DataFrame(columns=["name", "type", "keywords"])
-    # убираем полностью пустые строки
+        return pd.DataFrame(columns=columns)
     df = df.dropna(how="all").reset_index(drop=True)
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
     return df
+
+
+def _load_categories_df():
+    return _read_sheet("categories", ["name", "type", "keywords"])
+
+
+def _load_transactions_df():
+    return _read_sheet("transactions", ["date", "type", "amount", "category", "description", "comment"])
 
 
 def _save_categories_df(df):
     conn = get_conn()
     conn.update(worksheet="categories", data=df)
-
-
-def _load_transactions_df():
-    conn = get_conn()
-    df = conn.read(worksheet="transactions", ttl=0)
-    if df.empty:
-        return pd.DataFrame(columns=["date", "type", "amount", "category", "description", "comment"])
-    df = df.dropna(how="all").reset_index(drop=True)
-    return df
+    _invalidate_cache()
 
 
 def _append_transaction(d, amount, category_name, cat_type, description, comment):
@@ -63,28 +75,22 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
     }])
     combined = pd.concat([existing, new_row], ignore_index=True)
     conn.update(worksheet="transactions", data=combined)
+    _invalidate_cache()
 
 
 # ---------- Настройки ----------
 def get_setting(key, default=None):
-    conn = get_conn()
-    df = conn.read(worksheet="settings", ttl=0)
-    if df.empty or "key" not in df.columns:
+    df = _read_sheet("settings", ["key", "value"])
+    if df.empty:
         return default
-    df = df.dropna(how="all")
     row = df[df["key"].astype(str) == str(key)]
     return row.iloc[0]["value"] if not row.empty else default
 
 
 def set_setting(key, value):
-    """Всегда пишем строки, чтобы не было LossySetItemError."""
     conn = get_conn()
-    df = conn.read(worksheet="settings", ttl=0)
+    df = _read_sheet("settings", ["key", "value"])
 
-    if df.empty:
-        df = pd.DataFrame(columns=["key", "value"])
-
-    # Приводим всё к строке — это ключевой момент
     df["key"] = df["key"].astype(str)
     df["value"] = df["value"].astype(str)
 
@@ -98,6 +104,7 @@ def set_setting(key, value):
         )
 
     conn.update(worksheet="settings", data=df)
+    _invalidate_cache()
 
 
 def get_initial_balance():
@@ -115,7 +122,7 @@ def set_initial_balance(amount):
 
 
 # ---------- Синхронизация категорий ----------
-def _find_category_by_text(text, cat_type, categories):
+def _find_category_by_text(text, categories):
     """categories — список (name, keywords). Ищет по ключам."""
     text_lower = (text or "").lower()
     all_kw = []
@@ -156,13 +163,11 @@ def match_category(text, cats_df, cat_type):
 
 
 def sync_categories():
-    """Синхронизирует категории и пересчитывает все операции по ключам."""
+    """Синхронизирует категории и пересчитывает все операции по ключам.
+    Запускается один раз за сессию."""
     conn = get_conn()
 
-    # 1) Категории
     cats_df = _load_categories_df()
-
-    # Убеждаемся, что нужные колонки есть
     for col in ["name", "type", "keywords"]:
         if col not in cats_df.columns:
             cats_df[col] = ""
@@ -179,11 +184,9 @@ def sync_categories():
                 pd.DataFrame([{"name": name, "type": t, "keywords": kws}])
             ], ignore_index=True)
 
-    # Удаляем лишние категории
     cats_df = cats_df[cats_df["name"].isin(DESIRED_NAMES)].reset_index(drop=True)
     _save_categories_df(cats_df)
 
-    # 2) Операции — пересчитываем категории по ключам
     ops_df = _load_transactions_df()
     if not ops_df.empty and "description" in ops_df.columns:
         cat_list = [(row["name"], row["keywords"]) for _, row in cats_df.iterrows()]
@@ -197,13 +200,14 @@ def sync_categories():
                     continue
                 if _get_type_for(n, cats_df) == row["type"]:
                     candidates.append((n, k))
-            found = _find_category_by_text(row.get("description", ""), row["type"], candidates)
+            found = _find_category_by_text(row.get("description", ""), candidates)
             if found:
                 return found
             return other_exp if row["type"] == "expense" else other_inc
 
         ops_df["category"] = ops_df.apply(recategorize, axis=1)
         conn.update(worksheet="transactions", data=ops_df)
+        _invalidate_cache()
 
 
 # ---------- Вспомогательные ----------
@@ -239,7 +243,7 @@ def fmt_date(iso_date):
 # ============================================================
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
 
-# Синхронизацию вызываем один раз за сессию, чтобы не дёргать Google лишний раз
+# sync_categories — один раз за сессию (иначе много запросов к Google)
 if "synced" not in st.session_state:
     sync_categories()
     st.session_state.synced = True
@@ -266,10 +270,7 @@ def page_onboarding():
     with st.form("onboarding"):
         initial = st.number_input(
             "Начальная сумма (₽)",
-            min_value=1,
-            step=1000,
-            format="%d",
-            value=None
+            min_value=1, step=1000, format="%d", value=None
         )
         submitted = st.form_submit_button("Начать учёт", type="primary")
 
@@ -353,7 +354,6 @@ def page_operations():
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
-    # Приводим типы
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
 
     initial = get_initial_balance() or 0
