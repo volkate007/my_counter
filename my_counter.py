@@ -30,7 +30,6 @@ def get_conn():
 
 
 def _normalize_category(cat):
-    """Приводит 'Другое (расход)' / 'Другое (доход)' к 'Другое'."""
     if cat is None:
         return ""
     cat = str(cat).strip()
@@ -69,9 +68,7 @@ def _load_categories_df():
         return pd.DataFrame(
             [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
         )
-    # Нормализуем название категории
     df["name"] = df["name"].apply(_normalize_category)
-    # Удаляем дубликаты, оставляя первый
     df = df.drop_duplicates(subset=["name"], keep="first").reset_index(drop=True)
     return df
 
@@ -79,7 +76,6 @@ def _load_categories_df():
 def _load_transactions_df():
     df = _cached_read("transactions", TX_COLUMNS)
     if not df.empty:
-        # Нормализуем категорию при чтении (не трогаем таблицу)
         df["category"] = df["category"].apply(_normalize_category)
     return df
 
@@ -139,9 +135,6 @@ def set_initial_balance(amount):
 
 # ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
-    """Ищет категорию по ключевым словам.
-    «Другое» (both) не участвует в поиске.
-    Если ничего не найдено — возвращает 'Другое'."""
     text_lower = (text or "").lower()
     all_kw = []
     for _, row in cats_df.iterrows():
@@ -195,6 +188,8 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
+    """Таблица операций за день. Колонка «Категория» НЕ отображается,
+    но остаётся в данных (и в Google Sheets)."""
     view = day_df.copy().reset_index(drop=True)
 
     view["date_str"] = view["date"].apply(fmt_date)
@@ -206,14 +201,15 @@ def render_day_table(day_df):
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    for col in ["category", "description", "comment"]:
+    # Пустые значения — пустая строка
+    for col in ["description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
-    view = view[["date_str", "amount_str", "category", "description", "comment"]]
+    # Колонки для отображения: без category
+    view = view[["date_str", "amount_str", "description", "comment"]]
     view = view.rename(columns={
         "date_str": "Дата",
         "amount_str": "Сумма",
-        "category": "Категория",
         "description": "Описание",
         "comment": "Комментарий",
     })
