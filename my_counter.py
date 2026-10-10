@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
 from datetime import date
 from streamlit_gsheets import GSheetsConnection
 
 # ============================================================
-# КАТЕГОРИИ — ИСТОЧНИК ПРАВДЫ
+# КАТЕГОРИИ — ИСТОЧНИК ПРАВДЫ (только здесь, менять только тут)
 # ============================================================
 DESIRED_CATEGORIES = [
     ("Продукты",        "expense", "пятёрочка,пятерочка,магнит,перекресток,лента,ашан,дикси,магнолия,кб,пяторочка,ароматный мир"),
@@ -24,98 +22,13 @@ CACHE_TTL = 30
 
 
 # ============================================================
-# ПРЯМОЕ ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ЧЕРЕЗ GSPREAD
-# ============================================================
-@st.cache_resource
-def get_gsheets_client():
-    """Клиент gspread с тем же service account, что в secrets."""
-    secrets_dict = dict(st.secrets["connections"]["gsheets"])
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(secrets_dict, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-@st.cache_resource
-def get_spreadsheet():
-    """Открывает саму таблицу."""
-    secrets_dict = dict(st.secrets["connections"]["gsheets"])
-    url = secrets_dict["spreadsheet"]
-    client = get_gsheets_client()
-    return client.open_by_url(url)
-
-
-# ============================================================
-# ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS (для transactions и settings)
+# ПОДКЛЮЧЕНИЕ
 # ============================================================
 @st.cache_resource
 def get_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
 
-# ============================================================
-# КАТЕГОРИИ — через gspread напрямую
-# ============================================================
-def write_categories_from_code():
-    """Записывает DESIRED_CATEGORIES в лист categories. Создаёт лист, если нужно.
-    Полностью перезаписывает содержимое."""
-    try:
-        sh = get_spreadsheet()
-        try:
-            ws = sh.worksheet("categories")
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="categories", rows=50, cols=3)
-
-        # Формируем данные: заголовки + строки
-        data = [["name", "type", "keywords"]]
-        for name, t, kws in DESIRED_CATEGORIES:
-            data.append([name, t, kws])
-
-        # Полностью очищаем и записываем
-        ws.clear()
-        ws.update(data, "A1")
-        return True
-    except Exception as e:
-        st.session_state["cat_write_error"] = str(e)
-        return False
-
-
-def read_categories():
-    """Читает категории из листа categories через gspread."""
-    try:
-        sh = get_spreadsheet()
-        ws = sh.worksheet("categories")
-        rows = ws.get_all_values()
-        if not rows or len(rows) < 2:
-            return pd.DataFrame(columns=["name", "type", "keywords"])
-        header = rows[0]
-        data = rows[1:]
-        df = pd.DataFrame(data, columns=header[:len(data[0])] if data else header)
-        # Обрезаем до нужных колонок
-        for col in ["name", "type", "keywords"]:
-            if col not in df.columns:
-                df[col] = ""
-        return df[["name", "type", "keywords"]]
-    except Exception as e:
-        st.session_state["cat_read_error"] = str(e)
-        return pd.DataFrame(columns=["name", "type", "keywords"])
-
-
-def _load_categories_df():
-    """Читает категории через gspread. Если пусто — возвращает из кода."""
-    df = read_categories()
-    if df.empty:
-        return pd.DataFrame(
-            [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
-        )
-    return df
-
-
-# ============================================================
-# ТРАНЗАКЦИИ — через streamlit-gsheets
-# ============================================================
 def _fresh_read(worksheet, columns):
     conn = get_conn()
     df = conn.read(worksheet=worksheet, ttl=0)
@@ -140,6 +53,18 @@ def _cached_read(worksheet, columns):
     return df
 
 
+# ---------- Категории: только чтение ----------
+def _load_categories_df():
+    """Читает категории из таблицы. Если пусто — берёт из кода."""
+    df = _cached_read("categories", ["name", "type", "keywords"])
+    if df.empty:
+        return pd.DataFrame(
+            [{"name": n, "type": t, "keywords": k} for n, t, k in DESIRED_CATEGORIES]
+        )
+    return df
+
+
+# ---------- Транзакции ----------
 def _load_transactions_df():
     return _cached_read("transactions", ["date", "type", "amount", "category", "description", "comment"])
 
@@ -163,9 +88,7 @@ def _append_transaction(d, amount, category_name, cat_type, description, comment
     conn.clear()
 
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
+# ---------- Настройки ----------
 def get_setting(key, default=None):
     df = _cached_read("settings", ["key", "value"])
     if df.empty:
@@ -202,9 +125,7 @@ def set_initial_balance(amount):
     set_setting("initial_balance", str(int(amount)))
 
 
-# ============================================================
-# РАСПОЗНАВАНИЕ
-# ============================================================
+# ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
     text_lower = text.lower()
     all_kw = []
@@ -222,9 +143,7 @@ def match_category(text, cats_df, cat_type):
     return None, None
 
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ
-# ============================================================
+# ---------- Вспомогательные ----------
 def month_label(year, month):
     months = ["январь", "февраль", "март", "апрель", "май", "июнь",
               "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
@@ -256,11 +175,6 @@ def fmt_date(iso_date):
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================
 st.set_page_config(page_title="Мои финансы", page_icon="💰", layout="wide")
-
-# Один раз за сессию — записываем категории из кода в таблицу
-if "categories_synced" not in st.session_state:
-    write_categories_from_code()
-    st.session_state.categories_synced = True
 
 st.markdown("""
 <style>
@@ -437,20 +351,15 @@ def page_operations():
 
 
 # ============================================================
-# КАТЕГОРИИ (просмотр)
+# КАТЕГОРИИ (только просмотр, БЕЗ редактирования)
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
     st.caption(
-        "Категории задаются в коде приложения (переменная `DESIRED_CATEGORIES`). "
-        "Чтобы изменить список — отредактируй код и перезапусти приложение."
+        "Категории заданы в коде (переменная `DESIRED_CATEGORIES`). "
+        "Чтобы что-то изменить — отредактируй код и перезапусти приложение. "
+        "Редактирование через интерфейс отключено, чтобы не потерять данные."
     )
-
-    # Показать ошибки, если были
-    if "cat_write_error" in st.session_state:
-        st.error(f"Ошибка записи в Google Sheets: {st.session_state['cat_write_error']}")
-    if "cat_read_error" in st.session_state:
-        st.warning(f"Ошибка чтения: {st.session_state['cat_read_error']}")
 
     cats_df = _load_categories_df()
 
