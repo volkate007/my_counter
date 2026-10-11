@@ -286,7 +286,7 @@ def render_day_table(day_df):
 
 
 def render_category_cards(df_type, kind, month_key):
-    """Ряд плашек-кнопок. Клик по самой плашке раскрывает операции."""
+    """Ряд маленьких кликабельных плашек. Две строки, цветной текст суммы."""
     if df_type.empty:
         return
 
@@ -298,7 +298,7 @@ def render_category_cards(df_type, kind, month_key):
         st.session_state[open_key] = None
 
     items = list(grouped.items())
-    per_row = 6  # больше плашек в ряд = меньше ширина каждой
+    per_row = 6  # узкие плашки, 6 в ряд
 
     for row_start in range(0, len(items), per_row):
         chunk = items[row_start:row_start + per_row]
@@ -309,15 +309,73 @@ def render_category_cards(df_type, kind, month_key):
             is_open = st.session_state[open_key] == cat_name
 
             sign = "−" if kind == "expense" else "+"
-            # Метка кнопки: 3 строки — имя, сумма, процент
-            label = f"{cat_name}\n\n{sign}{fmt_money(amount)} ₽  ·  {share:.0f}%"
+            amount_color = "#c0392b" if kind == "expense" else "#1a8f3a"
+            border_color = "#2563eb" if is_open else "#e5e7eb"
+            bg_color = "#eff6ff" if is_open else "#ffffff"
 
             with cols[i]:
+                # --- HTML-плашка (визуал) ---
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{bg_color};
+                        border:2px solid {border_color};
+                        border-radius:8px;
+                        padding:6px 4px;
+                        text-align:center;
+                        height:70px;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        gap:2px;
+                        margin-bottom:2px;
+                        box-sizing:border-box;
+                    ">
+                        <div style="
+                            font-size:11px;
+                            font-weight:600;
+                            color:#333;
+                            white-space:nowrap;
+                            overflow:hidden;
+                            text-overflow:ellipsis;
+                        ">{cat_name}</div>
+                        <div style="
+                            font-size:13px;
+                            font-weight:700;
+                            color:{amount_color};
+                            white-space:nowrap;
+                        ">{sign}{fmt_money(amount)} ₽</div>
+                        <div style="
+                            font-size:10px;
+                            color:#888;
+                        ">{share:.0f}%</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # --- Прозрачная кнопка поверх плашки ---
+                # Обёртка, чтобы кнопку «наложить» на плашку
+                st.markdown(
+                    f"""
+                    <style>
+                    div[data-testid="stButton"]:has(button[title="Показать операции: {cat_name}"]) > button {{
+                        margin-top: -76px !important;
+                        height: 70px !important;
+                        width: 100% !important;
+                        opacity: 0 !important;
+                        cursor: pointer !important;
+                        border: none !important;
+                    }}
+                    </style>
+                    """,
+                    unsafe_allow_html=True
+                )
+
                 if st.button(
-                    label,
+                    " ",
                     key=f"card_{kind}_{month_key}_{cat_name}",
                     use_container_width=True,
-                    type="primary" if is_open else "secondary",
                     help=f"Показать операции: {cat_name}"
                 ):
                     if is_open:
@@ -489,26 +547,6 @@ st.markdown("""
     }
     .acc-name { font-size: 14px; color: #666; }
     .acc-balance { font-size: 22px; font-weight: 700; color: #111; }
-
-    /* Кнопки-плашки категорий */
-    div[data-testid="stButton"] > button[kind="secondary"] {
-        height: 70px !important;
-        min-height: 70px !important;
-        padding: 4px 4px !important;
-        font-size: 12px !important;
-        line-height: 1.25 !important;
-        white-space: pre-wrap !important;
-        border-radius: 8px !important;
-    }
-    div[data-testid="stButton"] > button[kind="primary"] {
-        height: 70px !important;
-        min-height: 70px !important;
-        padding: 4px 4px !important;
-        font-size: 12px !important;
-        line-height: 1.25 !important;
-        white-space: pre-wrap !important;
-        border-radius: 8px !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
