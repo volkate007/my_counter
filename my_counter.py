@@ -11,14 +11,18 @@ DESIRED_CATEGORIES = [
     ("Маркетплейс", "expense", "вб,wb,вайлдберриз,wildberries,озон,ozon,яндекс маркет,зя,золотое яблоко"),
     ("Еда",         "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
     ("Транспорт",   "expense", "проездной,тройка,стрелка,метро,автобус"),
-    ("Спорт",       "expense", "соревнования,семинар,аттестация"),
+    ("Спорт",       "expense", "соревнования,семинар,аттестация,членский взнос,тренировки"),
     ("Зарплата",    "income",  "100б,судейство,зарплата,аванс,зп"),
     ("Переводы",    "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
     ("Другое",      "both",    ""),
 ]
 
+# Список счетов по умолчанию (если лист accounts пуст)
+DEFAULT_ACCOUNTS = ["Основной", "Спорт", "Зарплата"]
+
 CACHE_TTL = 30
-TX_COLUMNS = ["date", "type", "amount", "category", "description", "comment"]
+TX_COLUMNS = ["date", "type", "amount", "account", "category", "description", "comment"]
+ACC_COLUMNS = ["name", "initial_balance"]
 
 
 # ============================================================
@@ -62,6 +66,7 @@ def _cached_read(worksheet, columns):
     return df
 
 
+# ---------- Категории ----------
 def _load_categories_df():
     df = _cached_read("categories", ["name", "type", "keywords"])
     if df.empty:
@@ -73,21 +78,65 @@ def _load_categories_df():
     return df
 
 
+# ---------- Счета ----------
+def _load_accounts_df():
+    """Читает счета. Если лист пуст — возвращает дефолтные с нулевым балансом."""
+    df = _cached_read("accounts", ACC_COLUMNS)
+    if df.empty:
+        return pd.DataFrame([
+            {"name": a, "initial_balance": 0} for a in DEFAULT_ACCOUNTS
+        ])
+    df["name"] = df["name"].astype(str).str.strip()
+    df = df[df["name"] != ""].reset_index(drop=True)
+    df["initial_balance"] = pd.to_numeric(df["initial_balance"], errors="coerce").fillna(0).astype(int)
+    return df
+
+
+def _save_accounts_df(df):
+    conn = get_conn()
+    df = df[ACC_COLUMNS].copy().fillna("")
+    conn.update(worksheet="accounts", data=df)
+    conn.clear()
+
+
+# ---------- Транзакции ----------
 def _load_transactions_df():
     df = _cached_read("transactions", TX_COLUMNS)
     if not df.empty:
         df["category"] = df["category"].apply(_normalize_category)
+        # Если account пустой — приписываем «Основной»
+        df["account"] = df["account"].fillna("").astype(str).str.strip()
+        df.loc[df["account"] == "", "account"] = "Основной"
     return df
 
 
-def _append_transaction(d, amount, category_name, cat_type, description, comment):
+def _append_transaction(d, amount, category_name, cat_type, description, comment, account):
     df = _fresh_read("transactions", TX_COLUMNS)
     new_row = pd.DataFrame([{
         "date": d.isoformat(),
         "type": cat_type,
         "amount": int(amount),
+        "account": account,
         "category": category_name,
         "description": description,
+        "comment": comment,
+    }])
+    combined = pd.concat([df, new_row], ignore_index=True)
+    conn = get_conn()
+    conn.update(worksheet="transactions", data=combined.fillna(""))
+    conn.clear()
+
+
+def _append_transfer(d, amount, from_account, to_account, comment):
+    """Перевод между счетами. Сохраняется как одна строка type='transfer'."""
+    df = _fresh_read("transactions", TX_COLUMNS)
+    new_row = pd.DataFrame([{
+        "date": d.isoformat(),
+        "type": "transfer",
+        "amount": int(amount),
+        "account": from_account,
+        "category": to_account,  # для перевода «category» = счёт-назначение
+        "description": f"перевод на {to_account}",
         "comment": comment,
     }])
     combined = pd.concat([df, new_row], ignore_index=True)
@@ -119,21 +168,7 @@ def set_setting(key, value):
     conn.clear()
 
 
-def get_initial_balance():
-    val = get_setting("initial_balance")
-    if val is None:
-        return None
-    try:
-        return int(float(val))
-    except (ValueError, TypeError):
-        return None
-
-
-def set_initial_balance(amount):
-    set_setting("initial_balance", str(int(amount)))
-
-
-# ---------- Распознавание ----------
+# ---------- Распознавание категорий ----------
 def match_category(text, cats_df, cat_type):
     text_lower = (text or "").lower()
     all_kw = []
@@ -157,6 +192,35 @@ def match_category(text, cats_df, cat_type):
             return cname, kw
 
     return "Другое", None
+
+
+# ---------- Подсчёт балансов ----------
+def compute_account_balances(accounts_df, tx_df):
+    """Возвращает dict: {account_name: balance}."""
+    balances = {}
+    for _, row in accounts_df.iterrows():
+        balances[str(row["name"])] = int(row["initial_balance"])
+
+    if tx_df.empty:
+        return balances
+
+    for _, tx in tx_df.iterrows():
+        t = str(tx["type"])
+        amt = int(tx["amount"])
+        acc = str(tx.get("account", "") or "Основной")
+
+        if t == "income":
+            balances[acc] = balances.get(acc, 0) + amt
+        elif t == "expense":
+            balances[acc] = balances.get(acc, 0) - amt
+        elif t == "transfer":
+            # Списываем со счёта-источника
+            balances[acc] = balances.get(acc, 0) - amt
+            # Прибавляем на счёт-назначение
+            target = str(tx.get("category", "") or "")
+            balances[target] = balances.get(target, 0) + amt
+
+    return balances
 
 
 # ---------- Вспомогательные ----------
@@ -188,24 +252,29 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
-    """Таблица операций за день. Колонки: Сумма | Описание | Комментарий.
-    Дата и категория не отображаются, но хранятся в Google Sheets."""
+    """Таблица операций за день. Колонки: Сумма | Счёт | Описание | Комментарий.
+    Переводы показываются отдельно."""
     view = day_df.copy().reset_index(drop=True)
 
     def signed(row):
         val = int(row["amount"])
-        sign = "+" if row["type"] == "income" else "−"
-        return f"{sign}{val:,}".replace(",", " ")
+        t = str(row["type"])
+        if t == "income":
+            return f"+{val:,}".replace(",", " ")
+        elif t == "expense":
+            return f"−{val:,}".replace(",", " ")
+        else:  # transfer
+            return f"↔ {val:,}".replace(",", " ")
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    # Пустые значения — пустая строка
-    for col in ["description", "comment"]:
+    for col in ["description", "comment", "account"]:
         view[col] = view[col].fillna("").astype(str)
 
-    view = view[["amount_str", "description", "comment"]]
+    view = view[["amount_str", "account", "description", "comment"]]
     view = view.rename(columns={
         "amount_str": "Сумма",
+        "account": "Счёт",
         "description": "Описание",
         "comment": "Комментарий",
     })
@@ -217,7 +286,12 @@ def render_day_table(day_df):
         styles = [""] * len(row)
         i = view.index.get_loc(row.name)
         t = types[i]
-        color = "#1a8f3a" if t == "income" else "#c0392b"
+        if t == "income":
+            color = "#1a8f3a"
+        elif t == "expense":
+            color = "#c0392b"
+        else:  # transfer
+            color = "#2563eb"
         styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
         return styles
 
@@ -246,6 +320,15 @@ st.markdown("""
         padding: 4px 0;
         border-bottom: 1px solid #e5e7eb;
     }
+    .acc-tile {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 4px 0;
+    }
+    .acc-name { font-size: 14px; color: #666; }
+    .acc-balance { font-size: 22px; font-weight: 700; color: #111; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -268,25 +351,83 @@ def page_onboarding():
             if initial is None:
                 st.error("Введи начальную сумму")
             else:
-                set_initial_balance(int(initial))
+                # Сохраняем «Основной» с этой суммой
+                acc_df = _load_accounts_df()
+                if "Основной" not in acc_df["name"].tolist():
+                    acc_df = pd.concat([
+                        acc_df,
+                        pd.DataFrame([{"name": "Основной", "initial_balance": initial}])
+                    ], ignore_index=True)
+                else:
+                    acc_df.loc[acc_df["name"] == "Основной", "initial_balance"] = initial
+                _save_accounts_df(acc_df)
+
+                # Отмечаем онбординг
+                set_setting("onboarded", "1")
                 st.rerun()
 
 
 # ============================================================
-# ОПЕРАЦИИ
+# СТРАНИЦА: ОПЕРАЦИИ
 # ============================================================
 def page_operations():
     st.markdown("### 💰 Учёт доходов и расходов")
 
     cats_df = _load_categories_df()
+    acc_df = _load_accounts_df()
+    account_names = acc_df["name"].astype(str).tolist()
 
+    # ===== ШАПКА: БАЛАНСЫ ПО СЧЕТАМ =====
+    df = _load_transactions_df()
+    balances = compute_account_balances(acc_df, df)
+    total = sum(balances.values())
+
+    st.markdown("#### 💼 Балансы по счетам")
+
+    # Сетка плиток — по одной на счёт + итог
+    n_cols = len(account_names) + 1  # +1 для «Итого»
+    cols = st.columns(n_cols)
+
+    for i, acc in enumerate(account_names):
+        with cols[i]:
+            st.markdown(
+                f"""
+                <div class="acc-tile">
+                    <div class="acc-name">{acc}</div>
+                    <div class="acc-balance">{fmt_money(balances.get(acc, 0))} ₽</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    with cols[-1]:
+        st.markdown(
+            f"""
+            <div class="acc-tile" style="background:#eef2ff; border-color:#c7d2fe">
+                <div class="acc-name">Итого</div>
+                <div class="acc-balance">{fmt_money(total)} ₽</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.divider()
+
+    # ===== ФОРМА В SIDEBAR =====
     with st.sidebar:
-        op_type = st.radio("Тип операции", ["Расход", "Доход"], horizontal=True)
-        is_expense = op_type == "Расход"
-        cat_type = "expense" if is_expense else "income"
+        st.header("➕ Добавить операцию")
 
-        st.header(f"➕ Добавить {'расход' if is_expense else 'доход'}")
-        op_date = st.date_input("Дата", value=date.today())
+        # Сначала выбираем счёт
+        account = st.selectbox("Счёт", account_names, key="form_account")
+
+        op_kind = st.radio(
+            "Действие",
+            ["Расход", "Доход", "Перевод"],
+            horizontal=True,
+            key="form_kind"
+        )
+
+        op_date = st.date_input("Дата", value=date.today(), key="form_date")
 
         if "form_key" not in st.session_state:
             st.session_state.form_key = 0
@@ -296,68 +437,86 @@ def page_operations():
             min_value=1, step=10, format="%d", value=None,
             key=f"amount_{st.session_state.form_key}"
         )
-        description = st.text_input("Категория", key=f"desc_{st.session_state.form_key}")
-        comment = st.text_input("Комментарий", key=f"comment_{st.session_state.form_key}")
 
-        matched_name, matched_kw = None, None
-        if description:
-            matched_name, matched_kw = match_category(description, cats_df, cat_type)
-            if matched_name:
-                if matched_kw:
-                    st.success(f"Категория: **{matched_name}** (по слову «{matched_kw}»)")
-                else:
-                    st.info(f"Категория: **{matched_name}** (слово не распознано)")
-
-        if st.button("Добавить", type="primary", use_container_width=True):
-            if amount is None:
-                st.error("Введи сумму")
-            elif not description.strip():
-                st.error("Введи категорию")
+        if op_kind == "Перевод":
+            # Для перевода — выбрать счёт-назначение
+            target_options = [a for a in account_names if a != account]
+            if not target_options:
+                st.warning("Нужно минимум два счёта для перевода")
+                target_account = None
             else:
-                description_clean = description.strip().lower()
-                comment_clean = comment.strip().lower()
-
-                matched_name_final, _ = match_category(description_clean, cats_df, cat_type)
-                if not matched_name_final:
-                    matched_name_final = "Другое"
-
-                _append_transaction(
-                    op_date, amount, matched_name_final, cat_type,
-                    description_clean, comment_clean
+                target_account = st.selectbox(
+                    "На счёт", target_options, key="form_target"
                 )
-                st.session_state.form_key += 1
-                st.success(f"Добавлено: {amount} ₽ — {matched_name_final}")
-                st.rerun()
-
-        st.divider()
-        with st.expander("⚙️ Начальный баланс"):
-            current_initial = get_initial_balance() or 0
-            new_initial = st.number_input(
-                "Начальная сумма (₽)",
-                min_value=0, step=1000, format="%d",
-                value=int(current_initial),
-                key="edit_initial"
+            description = ""
+            comment = st.text_input(
+                "Комментарий", key=f"comment_{st.session_state.form_key}"
             )
-            if st.button("Сохранить", use_container_width=True):
-                set_initial_balance(int(new_initial))
-                st.success("Сохранено")
-                st.rerun()
 
-    df = _load_transactions_df()
+            if st.button("Перевести", type="primary", use_container_width=True):
+                if amount is None:
+                    st.error("Введи сумму")
+                elif target_account is None:
+                    st.error("Выбери счёт-назначение")
+                elif account == target_account:
+                    st.error("Счёт-источник и счёт-назначение совпадают")
+                else:
+                    _append_transfer(
+                        op_date, amount, account, target_account,
+                        comment.strip().lower()
+                    )
+                    st.session_state.form_key += 1
+                    st.success(f"Переведено: {amount} ₽ → {target_account}")
+                    st.rerun()
+        else:
+            # Расход / Доход
+            cat_type = "expense" if op_kind == "Расход" else "income"
 
+            description = st.text_input(
+                "Категория", key=f"desc_{st.session_state.form_key}"
+            )
+            comment = st.text_input(
+                "Комментарий", key=f"comment_{st.session_state.form_key}"
+            )
+
+            matched_name, matched_kw = None, None
+            if description:
+                matched_name, matched_kw = match_category(description, cats_df, cat_type)
+                if matched_name:
+                    if matched_kw:
+                        st.success(f"Категория: **{matched_name}** (по слову «{matched_kw}»)")
+                    else:
+                        st.info(f"Категория: **{matched_name}** (слово не распознано)")
+
+            if st.button("Добавить", type="primary", use_container_width=True):
+                if amount is None:
+                    st.error("Введи сумму")
+                elif not description.strip():
+                    st.error("Введи категорию")
+                else:
+                    description_clean = description.strip().lower()
+                    comment_clean = comment.strip().lower()
+
+                    matched_name_final, _ = match_category(
+                        description_clean, cats_df, cat_type
+                    )
+                    if not matched_name_final:
+                        matched_name_final = "Другое"
+
+                    _append_transaction(
+                        op_date, amount, matched_name_final, cat_type,
+                        description_clean, comment_clean, account
+                    )
+                    st.session_state.form_key += 1
+                    st.success(f"Добавлено: {amount} ₽ — {matched_name_final}")
+                    st.rerun()
+
+    # ===== СПИСОК МЕСЯЦЕВ =====
     if df.empty:
         st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
         return
 
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
-
-    initial = get_initial_balance() or 0
-    total_income_all = df.loc[df["type"] == "income", "amount"].sum()
-    total_expense_all = df.loc[df["type"] == "expense", "amount"].sum()
-    current_balance = initial + total_income_all - total_expense_all
-
-    st.metric("💼 Текущий баланс", f"{fmt_money(current_balance)} ₽")
-    st.divider()
 
     months = available_months(df)
     dates = pd.to_datetime(df["date"], errors="coerce")
@@ -365,8 +524,11 @@ def page_operations():
     for idx, (y, m) in enumerate(months):
         mask = (dates.dt.year == y) & (dates.dt.month == m)
         df_m = df[mask].copy()
-        m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
-        m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
+
+        # Доходы/расходы за месяц считаем по операциям, исключая переводы
+        real_ops = df_m[df_m["type"].isin(["income", "expense"])]
+        m_income = real_ops.loc[real_ops["type"] == "income", "amount"].sum()
+        m_expense = real_ops.loc[real_ops["type"] == "expense", "amount"].sum()
 
         label = f"📅 {month_label(y, m)}"
         is_first = (idx == 0)
@@ -402,7 +564,7 @@ def page_operations():
 
 
 # ============================================================
-# КАТЕГОРИИ (только просмотр)
+# СТРАНИЦА: КАТЕГОРИИ (только просмотр)
 # ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
@@ -443,13 +605,97 @@ def page_categories():
 
 
 # ============================================================
+# СТРАНИЦА: СЧЕТА
+# ============================================================
+def page_accounts():
+    st.title("⚙️ Счета и начальные балансы")
+    st.caption("Настрой начальные суммы для каждого счёта. От них считается текущий баланс.")
+
+    acc_df = _load_accounts_df()
+    tx_df = _load_transactions_df()
+
+    # ==== Текущие балансы (для справки) ====
+    balances = compute_account_balances(acc_df, tx_df)
+    st.markdown("**Текущие балансы**")
+    cols = st.columns(len(acc_df))
+    for i, (_, row) in enumerate(acc_df.iterrows()):
+        name = str(row["name"])
+        with cols[i]:
+            st.markdown(
+                f"""
+                <div class="acc-tile">
+                    <div class="acc-name">{name}</div>
+                    <div class="acc-balance">{fmt_money(balances.get(name, 0))} ₽</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    st.divider()
+
+    # ==== Начальные балансы ====
+    st.markdown("**Начальные суммы**")
+
+    with st.form("edit_accounts"):
+        new_initials = {}
+        for _, row in acc_df.iterrows():
+            name = str(row["name"])
+            new_initials[name] = st.number_input(
+                f"{name}",
+                min_value=0, step=1000, format="%d",
+                value=int(row["initial_balance"]),
+                key=f"acc_init_{name}"
+            )
+
+        if st.form_submit_button("💾 Сохранить начальные суммы", type="primary"):
+            updated = acc_df.copy()
+            for name, val in new_initials.items():
+                updated.loc[updated["name"] == name, "initial_balance"] = int(val)
+            _save_accounts_df(updated)
+            st.success("Сохранено")
+            st.rerun()
+
+    st.divider()
+
+    # ==== Добавить / удалить счёт ====
+    st.markdown("**Управление счетами**")
+
+    with st.form("add_account"):
+        new_acc_name = st.text_input("Название нового счёта")
+        if st.form_submit_button("➕ Добавить счёт"):
+            if not new_acc_name.strip():
+                st.error("Введи название")
+            elif new_acc_name.strip() in acc_df["name"].tolist():
+                st.error("Такой счёт уже есть")
+            else:
+                updated = pd.concat([
+                    acc_df,
+                    pd.DataFrame([{"name": new_acc_name.strip(), "initial_balance": 0}])
+                ], ignore_index=True)
+                _save_accounts_df(updated)
+                st.success(f"Счёт «{new_acc_name}» добавлен")
+                st.rerun()
+
+    # Удаление счёта
+    if len(acc_df) > 1:
+        with st.expander("🗑️ Удалить счёт"):
+            del_name = st.selectbox("Какой счёт удалить", acc_df["name"].tolist())
+            if st.button("Удалить", type="secondary"):
+                updated = acc_df[acc_df["name"] != del_name].reset_index(drop=True)
+                _save_accounts_df(updated)
+                st.success(f"Счёт «{del_name}» удалён")
+                st.rerun()
+
+
+# ============================================================
 # НАВИГАЦИЯ
 # ============================================================
-if get_initial_balance() is None:
+if get_setting("onboarded") is None and _load_accounts_df()["initial_balance"].sum() == 0:
     page_onboarding()
 else:
     pages = [
         st.Page(page_operations, title="Операции", icon="💰", default=True),
+        st.Page(page_accounts, title="Счета", icon="⚙️"),
         st.Page(page_categories, title="Категории", icon="🏷️"),
     ]
     nav = st.navigation(pages, position="sidebar")
