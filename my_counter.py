@@ -260,7 +260,6 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
-    """Таблица операций за день. Переводы не показываются (их отфильтровали раньше)."""
     view = day_df.copy().reset_index(drop=True)
 
     def signed(row):
@@ -298,17 +297,13 @@ def render_day_table(day_df):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def render_month_blocks(df, show_account_column=False):
-    """Рисует список месяцев с раскрывающимися днями и таблицами операций.
-    Переводы в таблицах НЕ показываются.
-    show_account_column — добавляет колонку «Счёт» (для страницы Счета не нужно)."""
+def render_month_blocks(df):
+    """Для главной страницы: по месяцам → по дням."""
     if df.empty:
         st.info("Нет операций.")
         return
 
-    # Оставляем только доходы/расходы (убираем переводы)
     df = df[df["type"].isin(["income", "expense"])].copy()
-
     if df.empty:
         st.info("Нет операций для отображения.")
         return
@@ -356,6 +351,55 @@ def render_month_blocks(df, show_account_column=False):
                     unsafe_allow_html=True
                 )
                 render_day_table(day_df)
+
+
+def render_account_operations_table(df):
+    """Для страницы «Счета»: единая таблица с колонкой «Дата».
+    Без разбиения по месяцам и без метрик."""
+    if df.empty:
+        st.info("Нет операций по этому счёту.")
+        return
+
+    df = df[df["type"].isin(["income", "expense"])].copy()
+    if df.empty:
+        st.info("Нет операций для отображения.")
+        return
+
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
+    df["_date_obj"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False).reset_index(drop=True)
+
+    def signed(row):
+        val = int(row["amount"])
+        t = str(row["type"])
+        return f"+{val:,}".replace(",", " ") if t == "income" else f"−{val:,}".replace(",", " ")
+
+    df["amount_str"] = df.apply(signed, axis=1)
+    df["date_str"] = df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y"))
+
+    for col in ["description", "comment"]:
+        df[col] = df[col].fillna("").astype(str)
+
+    view = df[["date_str", "amount_str", "description", "comment"]].rename(columns={
+        "date_str": "Дата",
+        "amount_str": "Сумма",
+        "description": "Описание",
+        "comment": "Комментарий",
+    })
+
+    types = df["type"].tolist()
+    sum_col_idx = view.columns.get_loc("Сумма")
+
+    def style_row(row):
+        styles = [""] * len(row)
+        i = view.index.get_loc(row.name)
+        t = types[i]
+        color = "#1a8f3a" if t == "income" else "#c0392b"
+        styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
+        return styles
+
+    styled = view.style.apply(style_row, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -621,13 +665,11 @@ def page_accounts():
 
     balances = compute_account_balances(acc_df, tx_df)
 
-    # ---- Кнопки-плитки счетов ----
     account_names = acc_df["name"].astype(str).tolist()
 
     if "selected_account" not in st.session_state:
         st.session_state.selected_account = account_names[0]
 
-    # Если сохранённый счёт исчез — сбрасываем на первый
     if st.session_state.selected_account not in account_names:
         st.session_state.selected_account = account_names[0]
 
@@ -643,7 +685,6 @@ def page_accounts():
 
     st.divider()
 
-    # ---- Операции выбранного счёта ----
     selected = st.session_state.selected_account
     st.markdown(f"#### 📋 Операции по счёту «{selected}»")
 
@@ -653,7 +694,8 @@ def page_accounts():
         st.info(f"По счёту «{selected}» пока нет операций.")
         return
 
-    render_month_blocks(df_acc)
+    # Единая таблица — без разбиения по месяцам, без метрик, с колонкой «Дата»
+    render_account_operations_table(df_acc)
 
 
 # ============================================================
