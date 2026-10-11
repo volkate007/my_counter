@@ -285,70 +285,6 @@ def render_day_table(day_df):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def render_category_cards(df_type, kind, month_key):
-    """Ряд кликабельных плашек-кнопок. Метка в 3 строки: имя, сумма, процент."""
-    if df_type.empty:
-        return
-
-    grouped = df_type.groupby("category")["amount"].sum().sort_values(ascending=False)
-    total = grouped.sum()
-
-    open_key = f"open_cat_{kind}_{month_key}"
-    if open_key not in st.session_state:
-        st.session_state[open_key] = None
-
-    items = list(grouped.items())
-    per_row = 6
-
-    for row_start in range(0, len(items), per_row):
-        chunk = items[row_start:row_start + per_row]
-        cols = st.columns(per_row)
-
-        for i in range(per_row):
-            with cols[i]:
-                if i >= len(chunk):
-                    continue
-
-                cat_name, amount = chunk[i]
-                share = amount / total * 100 if total > 0 else 0
-                is_open = st.session_state[open_key] == cat_name
-
-                sign = "−" if kind == "expense" else "+"
-
-                # 3 строки через \n\n
-                label = f"{cat_name}\n\n{sign}{fmt_money(amount)} ₽\n\n{share:.0f}%"
-
-                if st.button(
-                    label,
-                    key=f"card_{kind}_{month_key}_{cat_name}",
-                    use_container_width=True,
-                    type="primary" if is_open else "secondary",
-                    help=f"Показать операции: {cat_name}"
-                ):
-                    if is_open:
-                        st.session_state[open_key] = None
-                    else:
-                        st.session_state[open_key] = cat_name
-                    st.rerun()
-
-    opened = st.session_state[open_key]
-    if opened:
-        cat_df = df_type[df_type["category"] == opened].copy()
-        cat_df["_date_obj"] = pd.to_datetime(cat_df["date"], errors="coerce")
-        cat_df = cat_df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False)
-
-        sign = "−" if kind == "expense" else "+"
-        view = pd.DataFrame({
-            "Дата": cat_df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y")),
-            "Сумма": cat_df["amount"].apply(lambda x: f"{sign}{fmt_money(x)} ₽"),
-            "Описание": cat_df["description"].fillna("").astype(str),
-            "Комментарий": cat_df["comment"].fillna("").astype(str),
-        }).reset_index(drop=True)
-
-        st.markdown(f"**{opened}**")
-        st.dataframe(view, use_container_width=True, hide_index=True)
-
-
 def render_month_blocks(df):
     if df.empty:
         st.info("Нет операций.")
@@ -375,6 +311,7 @@ def render_month_blocks(df):
         label = f"📅 {month_label(y, m)}"
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
+            # ---- Метрики за месяц ----
             st.markdown(
                 f"""
                 <div class="metrics-row">
@@ -393,22 +330,35 @@ def render_month_blocks(df):
 
             st.divider()
 
-            expense_df = df_m[df_m["type"] == "expense"].copy()
-            if not expense_df.empty:
-                render_category_cards(expense_df, "expense", month_key)
+            # ---- Фильтр по категориям ----
+            all_cats = sorted(df_m["category"].dropna().unique().tolist())
+            selected_cats = st.multiselect(
+                "Фильтр по категориям",
+                options=all_cats,
+                default=[],
+                key=f"cat_filter_{month_key}",
+                placeholder="Все категории",
+                help="Выбери одну или несколько категорий — покажутся только они. Пусто — все."
+            )
 
-            income_df = df_m[df_m["type"] == "income"].copy()
-            if not income_df.empty:
-                st.markdown("")
-                render_category_cards(income_df, "income", month_key)
+            # Фильтруем
+            if selected_cats:
+                df_filtered = df_m[df_m["category"].isin(selected_cats)].copy()
+            else:
+                df_filtered = df_m.copy()
 
             st.divider()
 
-            df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
-            unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
+            # ---- Таблицы по дням ----
+            if df_filtered.empty:
+                st.caption("Нет операций по выбранным категориям.")
+                continue
+
+            df_filtered["_date_obj"] = pd.to_datetime(df_filtered["date"], errors="coerce")
+            unique_dates = sorted(df_filtered["_date_obj"].dropna().unique(), reverse=True)
 
             for d in unique_dates:
-                day_df = df_m[df_m["_date_obj"] == d].copy()
+                day_df = df_filtered[df_filtered["_date_obj"] == d].copy()
 
                 st.markdown(
                     f"<div class='day-header'>📆 {pd.Timestamp(d).strftime('%d.%m.%Y')}</div>",
@@ -494,18 +444,6 @@ st.markdown("""
     }
     .acc-name { font-size: 14px; color: #666; }
     .acc-balance { font-size: 22px; font-weight: 700; color: #111; }
-
-    /* Кнопки-плашки категорий — три строки */
-    div[data-testid="stButton"] > button {
-        height: 78px !important;
-        min-height: 78px !important;
-        padding: 6px 4px !important;
-        font-size: 11px !important;
-        line-height: 1.3 !important;
-        white-space: pre-wrap !important;
-        border-radius: 8px !important;
-        text-align: center !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
