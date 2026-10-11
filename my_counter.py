@@ -188,11 +188,9 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
-    """Таблица операций за день. Колонка «Категория» НЕ отображается,
-    но остаётся в данных (и в Google Sheets)."""
+    """Таблица операций за день. Колонки: Сумма | Описание | Комментарий.
+    Дата и категория не отображаются, но хранятся в Google Sheets."""
     view = day_df.copy().reset_index(drop=True)
-
-    view["date_str"] = view["date"].apply(fmt_date)
 
     def signed(row):
         val = int(row["amount"])
@@ -205,10 +203,8 @@ def render_day_table(day_df):
     for col in ["description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
-    # Колонки для отображения: без category
-    view = view[["date_str", "amount_str", "description", "comment"]]
+    view = view[["amount_str", "description", "comment"]]
     view = view.rename(columns={
-        "date_str": "Дата",
         "amount_str": "Сумма",
         "description": "Описание",
         "comment": "Комментарий",
