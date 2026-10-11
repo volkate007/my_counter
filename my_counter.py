@@ -79,8 +79,6 @@ def _load_categories_df():
 
 # ---------- Счета ----------
 def _load_accounts_df():
-    """Читает счета. Если лист пуст — возвращает дефолтные с нулевым балансом.
-    Названия приводятся к виду 'Первая заглавная' для консистентности."""
     df = _cached_read("accounts", ACC_COLUMNS)
     if df.empty:
         return pd.DataFrame([
@@ -88,13 +86,8 @@ def _load_accounts_df():
         ])
     df["name"] = df["name"].astype(str).str.strip()
     df = df[df["name"] != ""].reset_index(drop=True)
-
-    # Приводим к нормальному виду: первая буква заглавная
     df["name"] = df["name"].apply(lambda x: x[:1].upper() + x[1:] if x else x)
-
-    # Убираем дубликаты по имени (оставляем первый)
     df = df.drop_duplicates(subset=["name"], keep="first").reset_index(drop=True)
-
     df["initial_balance"] = pd.to_numeric(df["initial_balance"], errors="coerce").fillna(0).astype(int)
     return df
 
@@ -112,22 +105,15 @@ def _load_transactions_df():
     if not df.empty:
         df["category"] = df["category"].apply(_normalize_category)
         df["account"] = df["account"].fillna("").astype(str).str.strip()
+        df["account"] = df["account"].apply(lambda x: x[:1].upper() + x[1:] if x else x)
 
-        # Приводим счёт к виду «Первая заглавная»
-        df["account"] = df["account"].apply(
-            lambda x: x[:1].upper() + x[1:] if x else x
-        )
-
-        # Определяем счёт по умолчанию — первый из листа accounts
         acc_df = _load_accounts_df()
         default_account = (
             str(acc_df.iloc[0]["name"]) if not acc_df.empty else "Основной"
         )
 
-        # Пустые счета → счёт по умолчанию
         df.loc[df["account"] == "", "account"] = default_account
 
-        # Если записанный счёт не совпадает ни с одним из существующих — тоже в дефолт
         existing = set(acc_df["name"].astype(str))
         df.loc[~df["account"].isin(existing), "account"] = default_account
     return df
@@ -274,6 +260,7 @@ def fmt_date(iso_date):
 
 
 def render_day_table(day_df):
+    """Таблица операций за день. Переводы не показываются (их отфильтровали раньше)."""
     view = day_df.copy().reset_index(drop=True)
 
     def signed(row):
@@ -281,20 +268,17 @@ def render_day_table(day_df):
         t = str(row["type"])
         if t == "income":
             return f"+{val:,}".replace(",", " ")
-        elif t == "expense":
-            return f"−{val:,}".replace(",", " ")
         else:
-            return f"↔ {val:,}".replace(",", " ")
+            return f"−{val:,}".replace(",", " ")
 
     view["amount_str"] = view.apply(signed, axis=1)
 
-    for col in ["description", "comment", "account"]:
+    for col in ["description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
-    view = view[["amount_str", "account", "description", "comment"]]
+    view = view[["amount_str", "description", "comment"]]
     view = view.rename(columns={
         "amount_str": "Сумма",
-        "account": "Счёт",
         "description": "Описание",
         "comment": "Комментарий",
     })
@@ -306,17 +290,72 @@ def render_day_table(day_df):
         styles = [""] * len(row)
         i = view.index.get_loc(row.name)
         t = types[i]
-        if t == "income":
-            color = "#1a8f3a"
-        elif t == "expense":
-            color = "#c0392b"
-        else:
-            color = "#2563eb"
+        color = "#1a8f3a" if t == "income" else "#c0392b"
         styles[sum_col_idx] = f"color: {color}; font-weight: 600;"
         return styles
 
     styled = view.style.apply(style_row, axis=1)
     st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+def render_month_blocks(df, show_account_column=False):
+    """Рисует список месяцев с раскрывающимися днями и таблицами операций.
+    Переводы в таблицах НЕ показываются.
+    show_account_column — добавляет колонку «Счёт» (для страницы Счета не нужно)."""
+    if df.empty:
+        st.info("Нет операций.")
+        return
+
+    # Оставляем только доходы/расходы (убираем переводы)
+    df = df[df["type"].isin(["income", "expense"])].copy()
+
+    if df.empty:
+        st.info("Нет операций для отображения.")
+        return
+
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
+
+    months = available_months(df)
+    dates = pd.to_datetime(df["date"], errors="coerce")
+
+    for idx, (y, m) in enumerate(months):
+        mask = (dates.dt.year == y) & (dates.dt.month == m)
+        df_m = df[mask].copy()
+
+        m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
+        m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
+
+        label = f"📅 {month_label(y, m)}"
+        is_first = (idx == 0)
+        with st.expander(label, expanded=is_first):
+            st.markdown(
+                f"""
+                <div class="metrics-row">
+                    <div class="metric-cell">
+                        <div class="mini-metric-label">💵 Доходы</div>
+                        <div class="mini-metric-value">+{fmt_money(m_income)} ₽</div>
+                    </div>
+                    <div class="metric-cell">
+                        <div class="mini-metric-label">💸 Расходы</div>
+                        <div class="mini-metric-value">−{fmt_money(m_expense)} ₽</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            st.divider()
+
+            df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
+            unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
+
+            for d in unique_dates:
+                day_df = df_m[df_m["_date_obj"] == d].copy()
+
+                st.markdown(
+                    f"<div class='day-header'>📆 {pd.Timestamp(d).strftime('%d.%m.%Y')}</div>",
+                    unsafe_allow_html=True
+                )
+                render_day_table(day_df)
 
 
 # ============================================================
@@ -522,54 +561,7 @@ def page_operations():
                     st.success(f"Добавлено: {amount} ₽ — {matched_name_final}")
                     st.rerun()
 
-    if df.empty:
-        st.info("Пока нет ни одной операции. Добавь первую через панель слева 👈")
-        return
-
-    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
-
-    months = available_months(df)
-    dates = pd.to_datetime(df["date"], errors="coerce")
-
-    for idx, (y, m) in enumerate(months):
-        mask = (dates.dt.year == y) & (dates.dt.month == m)
-        df_m = df[mask].copy()
-
-        real_ops = df_m[df_m["type"].isin(["income", "expense"])]
-        m_income = real_ops.loc[real_ops["type"] == "income", "amount"].sum()
-        m_expense = real_ops.loc[real_ops["type"] == "expense", "amount"].sum()
-
-        label = f"📅 {month_label(y, m)}"
-        is_first = (idx == 0)
-        with st.expander(label, expanded=is_first):
-            st.markdown(
-                f"""
-                <div class="metrics-row">
-                    <div class="metric-cell">
-                        <div class="mini-metric-label">💵 Доходы</div>
-                        <div class="mini-metric-value">+{fmt_money(m_income)} ₽</div>
-                    </div>
-                    <div class="metric-cell">
-                        <div class="mini-metric-label">💸 Расходы</div>
-                        <div class="mini-metric-value">−{fmt_money(m_expense)} ₽</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            st.divider()
-
-            df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
-            unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
-
-            for d in unique_dates:
-                day_df = df_m[df_m["_date_obj"] == d].copy()
-
-                st.markdown(
-                    f"<div class='day-header'>📆 {pd.Timestamp(d).strftime('%d.%m.%Y')}</div>",
-                    unsafe_allow_html=True
-                )
-                render_day_table(day_df)
+    render_month_blocks(df)
 
 
 # ============================================================
@@ -617,79 +609,51 @@ def page_categories():
 # СТРАНИЦА: СЧЕТА
 # ============================================================
 def page_accounts():
-    st.title("⚙️ Счета и начальные балансы")
-    st.caption("Настрой начальные суммы для каждого счёта. От них считается текущий баланс.")
+    st.title("⚙️ Счета")
+    st.caption("Выбери счёт — увидишь только его операции.")
 
     acc_df = _load_accounts_df()
     tx_df = _load_transactions_df()
 
+    if acc_df.empty:
+        st.warning("Нет ни одного счёта.")
+        return
+
     balances = compute_account_balances(acc_df, tx_df)
-    st.markdown("**Текущие балансы**")
-    cols = st.columns(len(acc_df))
-    for i, (_, row) in enumerate(acc_df.iterrows()):
-        name = str(row["name"])
+
+    # ---- Кнопки-плитки счетов ----
+    account_names = acc_df["name"].astype(str).tolist()
+
+    if "selected_account" not in st.session_state:
+        st.session_state.selected_account = account_names[0]
+
+    # Если сохранённый счёт исчез — сбрасываем на первый
+    if st.session_state.selected_account not in account_names:
+        st.session_state.selected_account = account_names[0]
+
+    cols = st.columns(len(account_names))
+    for i, acc in enumerate(account_names):
+        is_selected = (acc == st.session_state.selected_account)
         with cols[i]:
-            st.markdown(
-                f"""
-                <div class="acc-tile">
-                    <div class="acc-name">{name}</div>
-                    <div class="acc-balance">{fmt_money(balances.get(name, 0))} ₽</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            label = f"{acc}\n\n{fmt_money(balances.get(acc, 0))} ₽"
+            btn_type = "primary" if is_selected else "secondary"
+            if st.button(label, key=f"acc_btn_{acc}", use_container_width=True, type=btn_type):
+                st.session_state.selected_account = acc
+                st.rerun()
 
     st.divider()
 
-    st.markdown("**Начальные суммы**")
+    # ---- Операции выбранного счёта ----
+    selected = st.session_state.selected_account
+    st.markdown(f"#### 📋 Операции по счёту «{selected}»")
 
-    with st.form("edit_accounts"):
-        new_initials = {}
-        for _, row in acc_df.iterrows():
-            name = str(row["name"])
-            new_initials[name] = st.number_input(
-                f"{name}",
-                min_value=0, step=1000, format="%d",
-                value=int(row["initial_balance"]),
-                key=f"acc_init_{name}"
-            )
+    df_acc = tx_df[tx_df["account"] == selected].copy()
 
-        if st.form_submit_button("💾 Сохранить начальные суммы", type="primary"):
-            updated = acc_df.copy()
-            for name, val in new_initials.items():
-                updated.loc[updated["name"] == name, "initial_balance"] = int(val)
-            _save_accounts_df(updated)
-            st.success("Сохранено")
-            st.rerun()
+    if df_acc.empty:
+        st.info(f"По счёту «{selected}» пока нет операций.")
+        return
 
-    st.divider()
-
-    st.markdown("**Управление счетами**")
-
-    with st.form("add_account"):
-        new_acc_name = st.text_input("Название нового счёта")
-        if st.form_submit_button("➕ Добавить счёт"):
-            if not new_acc_name.strip():
-                st.error("Введи название")
-            elif new_acc_name.strip() in acc_df["name"].tolist():
-                st.error("Такой счёт уже есть")
-            else:
-                updated = pd.concat([
-                    acc_df,
-                    pd.DataFrame([{"name": new_acc_name.strip(), "initial_balance": 0}])
-                ], ignore_index=True)
-                _save_accounts_df(updated)
-                st.success(f"Счёт «{new_acc_name}» добавлен")
-                st.rerun()
-
-    if len(acc_df) > 1:
-        with st.expander("🗑️ Удалить счёт"):
-            del_name = st.selectbox("Какой счёт удалить", acc_df["name"].tolist())
-            if st.button("Удалить", type="secondary"):
-                updated = acc_df[acc_df["name"] != del_name].reset_index(drop=True)
-                _save_accounts_df(updated)
-                st.success(f"Счёт «{del_name}» удалён")
-                st.rerun()
+    render_month_blocks(df_acc)
 
 
 # ============================================================
