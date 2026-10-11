@@ -65,7 +65,6 @@ def _cached_read(worksheet, columns):
     return df
 
 
-# ---------- Категории ----------
 def _load_categories_df():
     df = _cached_read("categories", ["name", "type", "keywords"])
     if df.empty:
@@ -77,7 +76,6 @@ def _load_categories_df():
     return df
 
 
-# ---------- Счета ----------
 def _load_accounts_df():
     df = _cached_read("accounts", ACC_COLUMNS)
     if df.empty:
@@ -99,7 +97,6 @@ def _save_accounts_df(df):
     conn.clear()
 
 
-# ---------- Транзакции ----------
 def _load_transactions_df():
     df = _cached_read("transactions", TX_COLUMNS)
     if not df.empty:
@@ -111,7 +108,6 @@ def _load_transactions_df():
         default_account = (
             str(acc_df.iloc[0]["name"]) if not acc_df.empty else "Основной"
         )
-
         df.loc[df["account"] == "", "account"] = default_account
 
         existing = set(acc_df["name"].astype(str))
@@ -153,7 +149,6 @@ def _append_transfer(d, amount, from_account, to_account, comment):
     conn.clear()
 
 
-# ---------- Настройки ----------
 def get_setting(key, default=None):
     df = _cached_read("settings", ["key", "value"])
     if df.empty:
@@ -176,7 +171,6 @@ def set_setting(key, value):
     conn.clear()
 
 
-# ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
     text_lower = (text or "").lower()
     all_kw = []
@@ -202,7 +196,6 @@ def match_category(text, cats_df, cat_type):
     return "Другое", None
 
 
-# ---------- Балансы ----------
 def compute_account_balances(accounts_df, tx_df):
     balances = {}
     for _, row in accounts_df.iterrows():
@@ -231,7 +224,6 @@ def compute_account_balances(accounts_df, tx_df):
     return balances
 
 
-# ---------- Вспомогательные ----------
 def month_label(year, month):
     months = ["январь", "февраль", "март", "апрель", "май", "июнь",
               "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
@@ -293,47 +285,104 @@ def render_day_table(day_df):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def render_category_breakdown(expense_df, month_key):
-    """Плашки категорий расходов за месяц. Клик → показать операции категории."""
-    if expense_df.empty:
-        st.caption("Расходов в этом месяце нет.")
+def render_category_card(cat_name, amount, total, kind, month_key):
+    """Рисует одну плашку категории с прогресс-баром.
+    kind: 'expense' или 'income'."""
+    share = amount / total * 100 if total > 0 else 0
+
+    # Цвета в зависимости от типа
+    if kind == "expense":
+        bar_color = "#ef4444"  # красный
+        amount_color = "#c0392b"
+        sign = "−"
+    else:
+        bar_color = "#22c55e"  # зелёный
+        amount_color = "#1a8f3a"
+        sign = "+"
+
+    bar_width_pct = max(share, 2)  # минимум 2%, чтобы полоска была видна
+
+    st.markdown(
+        f"""
+        <div style="
+            background:#ffffff;
+            border:1px solid #e5e7eb;
+            border-radius:10px;
+            padding:10px 14px;
+            margin:6px 0;
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+                <span style="font-size:16px; font-weight:600; color:#111">{cat_name}</span>
+                <span style="font-size:16px; font-weight:600; color:{amount_color}">{sign}{fmt_money(amount)} ₽</span>
+            </div>
+            <div style="
+                background:#f3f4f6;
+                border-radius:6px;
+                height:8px;
+                overflow:hidden;
+                margin-bottom:4px;
+            ">
+                <div style="
+                    background:{bar_color};
+                    width:{bar_width_pct}%;
+                    height:100%;
+                    border-radius:6px;
+                "></div>
+            </div>
+            <div style="font-size:12px; color:#666; text-align:right">{share:.0f}% от общих {kind.replace('expense', 'расходов').replace('income', 'доходов')}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_category_breakdown(df_type, kind, month_key):
+    """df_type — отфильтрованный DataFrame (только расходы или только доходы) за месяц.
+    kind: 'expense' или 'income'."""
+    if df_type.empty:
         return
 
-    # Группируем по категории
-    grouped = expense_df.groupby("category")["amount"].sum().sort_values(ascending=False)
+    grouped = df_type.groupby("category")["amount"].sum().sort_values(ascending=False)
+    total = grouped.sum()
 
-    total_expense = grouped.sum()
+    # Заголовок
+    if kind == "expense":
+        title = "💸 Расходы по категориям"
+    else:
+        title = "💵 Доходы по категориям"
 
-    st.markdown("**💸 Расходы по категориям**")
+    st.markdown(f"**{title}**")
 
-    # Состояние: какая категория раскрыта (уникально для каждого месяца)
-    open_key = f"open_cat_{month_key}"
+    # Состояние: какая категория раскрыта
+    open_key = f"open_cat_{kind}_{month_key}"
     if open_key not in st.session_state:
         st.session_state[open_key] = None
 
     for cat_name, amount in grouped.items():
-        share = amount / total_expense * 100 if total_expense > 0 else 0
+        # Плашка-карточка
+        render_category_card(cat_name, amount, total, kind, month_key)
+
+        # Кнопка раскрытия — маленькая, под плашкой
         is_open = st.session_state[open_key] == cat_name
+        btn_label = "▾ Скрыть операции" if is_open else "▸ Показать операции"
 
-        # Кнопка-плашка
-        label = f"{'▾' if is_open else '▸'}  {cat_name}    —    {fmt_money(amount)} ₽    ({share:.0f}%)"
-
-        if st.button(label, key=f"cat_btn_{month_key}_{cat_name}", use_container_width=True):
+        if st.button(btn_label, key=f"cat_btn_{kind}_{month_key}_{cat_name}"):
             if is_open:
                 st.session_state[open_key] = None
             else:
                 st.session_state[open_key] = cat_name
             st.rerun()
 
-        # Если эта категория раскрыта — показать её операции
+        # Если раскрыто — показать таблицу операций
         if is_open:
-            cat_df = expense_df[expense_df["category"] == cat_name].copy()
+            cat_df = df_type[df_type["category"] == cat_name].copy()
             cat_df["_date_obj"] = pd.to_datetime(cat_df["date"], errors="coerce")
             cat_df = cat_df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False)
 
+            sign = "−" if kind == "expense" else "+"
             view = pd.DataFrame({
                 "Дата": cat_df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y")),
-                "Сумма": cat_df["amount"].apply(lambda x: f"−{fmt_money(x)} ₽"),
+                "Сумма": cat_df["amount"].apply(lambda x: f"{sign}{fmt_money(x)} ₽"),
                 "Описание": cat_df["description"].fillna("").astype(str),
                 "Комментарий": cat_df["comment"].fillna("").astype(str),
             }).reset_index(drop=True)
@@ -342,7 +391,7 @@ def render_category_breakdown(expense_df, month_key):
 
 
 def render_month_blocks(df):
-    """По месяцам → метрики → плашки категорий → дни."""
+    """По месяцам → метрики → категории расходов и доходов → дни."""
     if df.empty:
         st.info("Нет операций.")
         return
@@ -386,9 +435,16 @@ def render_month_blocks(df):
 
             st.divider()
 
-            # Плашки категорий расходов
+            # РАСХОДЫ по категориям
             expense_df = df_m[df_m["type"] == "expense"].copy()
-            render_category_breakdown(expense_df, month_key)
+            if not expense_df.empty:
+                render_category_breakdown(expense_df, "expense", month_key)
+
+            # ДОХОДЫ по категориям
+            income_df = df_m[df_m["type"] == "income"].copy()
+            if not income_df.empty:
+                st.markdown("")  # отступ
+                render_category_breakdown(income_df, "income", month_key)
 
             st.divider()
 
@@ -407,7 +463,6 @@ def render_month_blocks(df):
 
 
 def render_account_operations_table(df):
-    """Для страницы «Счета»: единая таблица."""
     if df.empty:
         st.info("Нет операций по этому счёту.")
         return
@@ -488,9 +543,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ============================================================
-# ОНБОРДИНГ
-# ============================================================
 def page_onboarding():
     st.title("👋 Добро пожаловать в учёт финансов")
     st.markdown("Скажи: **сколько денег у тебя сейчас?** Это будет точкой отсчёта.")
@@ -519,9 +571,6 @@ def page_onboarding():
                 st.rerun()
 
 
-# ============================================================
-# СТРАНИЦА: ОПЕРАЦИИ
-# ============================================================
 def page_operations():
     st.markdown("### 💰 Учёт доходов и расходов")
 
@@ -660,9 +709,6 @@ def page_operations():
     render_month_blocks(df)
 
 
-# ============================================================
-# СТРАНИЦА: КАТЕГОРИИ
-# ============================================================
 def page_categories():
     st.title("🏷️ Категории и ключевые слова")
     st.caption(
@@ -701,9 +747,6 @@ def page_categories():
                     )
 
 
-# ============================================================
-# СТРАНИЦА: СЧЕТА
-# ============================================================
 def page_accounts():
     st.title("⚙️ Счета")
     st.caption("Выбери счёт — увидишь только его операции.")
