@@ -259,6 +259,59 @@ def fmt_date(iso_date):
         return iso_date
 
 
+# ---------- Плашки категорий (bar chart) ----------
+def render_category_bars(df_m):
+    """Рисует горизонтальные полоски по категориям расходов.
+    Сверху — самая крупная категория."""
+    expenses = df_m[df_m["type"] == "expense"].copy()
+    if expenses.empty:
+        return
+
+    expenses["amount"] = pd.to_numeric(expenses["amount"], errors="coerce").fillna(0).astype(int)
+    grouped = expenses.groupby("category", as_index=False)["amount"].sum()
+    grouped = grouped[grouped["amount"] > 0].sort_values("amount", ascending=False)
+
+    if grouped.empty:
+        return
+
+    max_amount = grouped["amount"].max()
+    total_amount = grouped["amount"].sum()
+
+    st.markdown("**💸 Расходы по категориям**")
+
+    # Строим HTML-блок
+    rows_html = []
+    for _, row in grouped.iterrows():
+        cat = str(row["category"]) or "—"
+        amt = int(row["amount"])
+        pct = (amt / max_amount * 100) if max_amount else 0
+        share = (amt / total_amount * 100) if total_amount else 0
+
+        rows_html.append(f"""
+        <div style="display:flex; align-items:center; margin:6px 0; gap:10px;">
+            <div style="flex:0 0 130px; font-size:14px; color:#333;
+                        white-space:nowrap; overflow:hidden;
+                        text-overflow:ellipsis;">{cat}</div>
+            <div style="flex:1; background:#f0f2f6; border-radius:6px;
+                        height:22px; position:relative;">
+                <div style="width:{pct:.1f}%; background:linear-gradient(90deg,#f87171,#ef4444);
+                            height:100%; border-radius:6px;"></div>
+            </div>
+            <div style="flex:0 0 110px; text-align:right; font-size:14px;
+                        font-weight:600; color:#111; white-space:nowrap;">
+                {fmt_money(amt)} ₽
+            </div>
+            <div style="flex:0 0 55px; text-align:right; font-size:13px;
+                        color:#666; white-space:nowrap;">
+                {share:.0f}%
+            </div>
+        </div>
+        """)
+
+    html = "".join(rows_html)
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def render_day_table(day_df):
     view = day_df.copy().reset_index(drop=True)
 
@@ -298,7 +351,7 @@ def render_day_table(day_df):
 
 
 def render_month_blocks(df):
-    """Для главной страницы: по месяцам → по дням."""
+    """Для главной: по месяцам → плашки категорий → по дням."""
     if df.empty:
         st.info("Нет операций.")
         return
@@ -338,6 +391,10 @@ def render_month_blocks(df):
                 """,
                 unsafe_allow_html=True
             )
+
+            # ===== ПЛАШКА КАТЕГОРИЙ =====
+            render_category_bars(df_m)
+
             st.divider()
 
             df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
@@ -354,8 +411,6 @@ def render_month_blocks(df):
 
 
 def render_account_operations_table(df):
-    """Для страницы «Счета»: единая таблица с колонкой «Дата».
-    Без разбиения по месяцам и без метрик."""
     if df.empty:
         st.info("Нет операций по этому счёту.")
         return
@@ -694,7 +749,6 @@ def page_accounts():
         st.info(f"По счёту «{selected}» пока нет операций.")
         return
 
-    # Единая таблица — без разбиения по месяцам, без метрик, с колонкой «Дата»
     render_account_operations_table(df_acc)
 
 
