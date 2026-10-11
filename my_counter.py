@@ -176,7 +176,7 @@ def set_setting(key, value):
     conn.clear()
 
 
-# ---------- Распознавание категорий ----------
+# ---------- Распознавание ----------
 def match_category(text, cats_df, cat_type):
     text_lower = (text or "").lower()
     all_kw = []
@@ -202,7 +202,7 @@ def match_category(text, cats_df, cat_type):
     return "Другое", None
 
 
-# ---------- Подсчёт балансов ----------
+# ---------- Балансы ----------
 def compute_account_balances(accounts_df, tx_df):
     balances = {}
     for _, row in accounts_df.iterrows():
@@ -259,77 +259,20 @@ def fmt_date(iso_date):
         return iso_date
 
 
-# ---------- Плашки категорий (bar chart) ----------
-def render_category_bars(df_m):
-    """Рисует горизонтальные полоски по категориям расходов.
-    Сверху — самая крупная категория."""
-    expenses = df_m[df_m["type"] == "expense"].copy()
-    if expenses.empty:
-        return
-
-    expenses["amount"] = pd.to_numeric(expenses["amount"], errors="coerce").fillna(0).astype(int)
-    grouped = expenses.groupby("category", as_index=False)["amount"].sum()
-    grouped = grouped[grouped["amount"] > 0].sort_values("amount", ascending=False)
-
-    if grouped.empty:
-        return
-
-    max_amount = grouped["amount"].max()
-    total_amount = grouped["amount"].sum()
-
-    st.markdown("**💸 Расходы по категориям**")
-
-    # Строим HTML-блок
-    rows_html = []
-    for _, row in grouped.iterrows():
-        cat = str(row["category"]) or "—"
-        amt = int(row["amount"])
-        pct = (amt / max_amount * 100) if max_amount else 0
-        share = (amt / total_amount * 100) if total_amount else 0
-
-        rows_html.append(f"""
-        <div style="display:flex; align-items:center; margin:6px 0; gap:10px;">
-            <div style="flex:0 0 130px; font-size:14px; color:#333;
-                        white-space:nowrap; overflow:hidden;
-                        text-overflow:ellipsis;">{cat}</div>
-            <div style="flex:1; background:#f0f2f6; border-radius:6px;
-                        height:22px; position:relative;">
-                <div style="width:{pct:.1f}%; background:linear-gradient(90deg,#f87171,#ef4444);
-                            height:100%; border-radius:6px;"></div>
-            </div>
-            <div style="flex:0 0 110px; text-align:right; font-size:14px;
-                        font-weight:600; color:#111; white-space:nowrap;">
-                {fmt_money(amt)} ₽
-            </div>
-            <div style="flex:0 0 55px; text-align:right; font-size:13px;
-                        color:#666; white-space:nowrap;">
-                {share:.0f}%
-            </div>
-        </div>
-        """)
-
-    html = "".join(rows_html)
-    st.markdown(html, unsafe_allow_html=True)
-
-
 def render_day_table(day_df):
     view = day_df.copy().reset_index(drop=True)
 
     def signed(row):
         val = int(row["amount"])
         t = str(row["type"])
-        if t == "income":
-            return f"+{val:,}".replace(",", " ")
-        else:
-            return f"−{val:,}".replace(",", " ")
+        return f"+{val:,}".replace(",", " ") if t == "income" else f"−{val:,}".replace(",", " ")
 
     view["amount_str"] = view.apply(signed, axis=1)
 
     for col in ["description", "comment"]:
         view[col] = view[col].fillna("").astype(str)
 
-    view = view[["amount_str", "description", "comment"]]
-    view = view.rename(columns={
+    view = view[["amount_str", "description", "comment"]].rename(columns={
         "amount_str": "Сумма",
         "description": "Описание",
         "comment": "Комментарий",
@@ -350,8 +293,56 @@ def render_day_table(day_df):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def render_category_breakdown(expense_df, month_key):
+    """Плашки категорий расходов за месяц. Клик → показать операции категории."""
+    if expense_df.empty:
+        st.caption("Расходов в этом месяце нет.")
+        return
+
+    # Группируем по категории
+    grouped = expense_df.groupby("category")["amount"].sum().sort_values(ascending=False)
+
+    total_expense = grouped.sum()
+
+    st.markdown("**💸 Расходы по категориям**")
+
+    # Состояние: какая категория раскрыта (уникально для каждого месяца)
+    open_key = f"open_cat_{month_key}"
+    if open_key not in st.session_state:
+        st.session_state[open_key] = None
+
+    for cat_name, amount in grouped.items():
+        share = amount / total_expense * 100 if total_expense > 0 else 0
+        is_open = st.session_state[open_key] == cat_name
+
+        # Кнопка-плашка
+        label = f"{'▾' if is_open else '▸'}  {cat_name}    —    {fmt_money(amount)} ₽    ({share:.0f}%)"
+
+        if st.button(label, key=f"cat_btn_{month_key}_{cat_name}", use_container_width=True):
+            if is_open:
+                st.session_state[open_key] = None
+            else:
+                st.session_state[open_key] = cat_name
+            st.rerun()
+
+        # Если эта категория раскрыта — показать её операции
+        if is_open:
+            cat_df = expense_df[expense_df["category"] == cat_name].copy()
+            cat_df["_date_obj"] = pd.to_datetime(cat_df["date"], errors="coerce")
+            cat_df = cat_df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False)
+
+            view = pd.DataFrame({
+                "Дата": cat_df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y")),
+                "Сумма": cat_df["amount"].apply(lambda x: f"−{fmt_money(x)} ₽"),
+                "Описание": cat_df["description"].fillna("").astype(str),
+                "Комментарий": cat_df["comment"].fillna("").astype(str),
+            }).reset_index(drop=True)
+
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
+
 def render_month_blocks(df):
-    """Для главной: по месяцам → плашки категорий → по дням."""
+    """По месяцам → метрики → плашки категорий → дни."""
     if df.empty:
         st.info("Нет операций.")
         return
@@ -373,6 +364,7 @@ def render_month_blocks(df):
         m_income = df_m.loc[df_m["type"] == "income", "amount"].sum()
         m_expense = df_m.loc[df_m["type"] == "expense", "amount"].sum()
 
+        month_key = f"{y}_{m}"
         label = f"📅 {month_label(y, m)}"
         is_first = (idx == 0)
         with st.expander(label, expanded=is_first):
@@ -392,11 +384,15 @@ def render_month_blocks(df):
                 unsafe_allow_html=True
             )
 
-            # ===== ПЛАШКА КАТЕГОРИЙ =====
-            render_category_bars(df_m)
+            st.divider()
+
+            # Плашки категорий расходов
+            expense_df = df_m[df_m["type"] == "expense"].copy()
+            render_category_breakdown(expense_df, month_key)
 
             st.divider()
 
+            # Таблицы по дням
             df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
             unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
 
@@ -411,6 +407,7 @@ def render_month_blocks(df):
 
 
 def render_account_operations_table(df):
+    """Для страницы «Счета»: единая таблица."""
     if df.empty:
         st.info("Нет операций по этому счёту.")
         return
