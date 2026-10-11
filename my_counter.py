@@ -285,113 +285,96 @@ def render_day_table(day_df):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def render_category_card(cat_name, amount, total, kind, month_key):
-    """Рисует одну плашку категории с прогресс-баром.
-    kind: 'expense' или 'income'."""
-    share = amount / total * 100 if total > 0 else 0
-
-    # Цвета в зависимости от типа
-    if kind == "expense":
-        bar_color = "#ef4444"  # красный
-        amount_color = "#c0392b"
-        sign = "−"
-    else:
-        bar_color = "#22c55e"  # зелёный
-        amount_color = "#1a8f3a"
-        sign = "+"
-
-    bar_width_pct = max(share, 2)  # минимум 2%, чтобы полоска была видна
-
-    st.markdown(
-        f"""
-        <div style="
-            background:#ffffff;
-            border:1px solid #e5e7eb;
-            border-radius:10px;
-            padding:10px 14px;
-            margin:6px 0;
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
-                <span style="font-size:16px; font-weight:600; color:#111">{cat_name}</span>
-                <span style="font-size:16px; font-weight:600; color:{amount_color}">{sign}{fmt_money(amount)} ₽</span>
-            </div>
-            <div style="
-                background:#f3f4f6;
-                border-radius:6px;
-                height:8px;
-                overflow:hidden;
-                margin-bottom:4px;
-            ">
-                <div style="
-                    background:{bar_color};
-                    width:{bar_width_pct}%;
-                    height:100%;
-                    border-radius:6px;
-                "></div>
-            </div>
-            <div style="font-size:12px; color:#666; text-align:right">{share:.0f}% от общих {kind.replace('expense', 'расходов').replace('income', 'доходов')}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-def render_category_breakdown(df_type, kind, month_key):
-    """df_type — отфильтрованный DataFrame (только расходы или только доходы) за месяц.
-    kind: 'expense' или 'income'."""
+def render_category_cards(df_type, kind, month_key):
+    """Ряд маленьких плашек-карточек. Клик по плашке раскрывает операции."""
     if df_type.empty:
         return
 
     grouped = df_type.groupby("category")["amount"].sum().sort_values(ascending=False)
     total = grouped.sum()
 
-    # Заголовок
-    if kind == "expense":
-        title = "💸 Расходы по категориям"
-    else:
-        title = "💵 Доходы по категориям"
-
+    title = "💸 Расходы по категориям" if kind == "expense" else "💵 Доходы по категориям"
     st.markdown(f"**{title}**")
 
-    # Состояние: какая категория раскрыта
     open_key = f"open_cat_{kind}_{month_key}"
     if open_key not in st.session_state:
         st.session_state[open_key] = None
 
-    for cat_name, amount in grouped.items():
-        # Плашка-карточка
-        render_category_card(cat_name, amount, total, kind, month_key)
+    # Разбиваем категории на строки по 4 штуки
+    items = list(grouped.items())
+    per_row = 4
 
-        # Кнопка раскрытия — маленькая, под плашкой
-        is_open = st.session_state[open_key] == cat_name
-        btn_label = "▾ Скрыть операции" if is_open else "▸ Показать операции"
+    for row_start in range(0, len(items), per_row):
+        chunk = items[row_start:row_start + per_row]
+        # Заполняем ряд колонками (если меньше 4 — оставшиеся пустые, чтобы выровнять ширину)
+        cols = st.columns(per_row)
 
-        if st.button(btn_label, key=f"cat_btn_{kind}_{month_key}_{cat_name}"):
-            if is_open:
-                st.session_state[open_key] = None
-            else:
-                st.session_state[open_key] = cat_name
-            st.rerun()
-
-        # Если раскрыто — показать таблицу операций
-        if is_open:
-            cat_df = df_type[df_type["category"] == cat_name].copy()
-            cat_df["_date_obj"] = pd.to_datetime(cat_df["date"], errors="coerce")
-            cat_df = cat_df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False)
+        for i, (cat_name, amount) in enumerate(chunk):
+            share = amount / total * 100 if total > 0 else 0
+            is_open = st.session_state[open_key] == cat_name
 
             sign = "−" if kind == "expense" else "+"
-            view = pd.DataFrame({
-                "Дата": cat_df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y")),
-                "Сумма": cat_df["amount"].apply(lambda x: f"{sign}{fmt_money(x)} ₽"),
-                "Описание": cat_df["description"].fillna("").astype(str),
-                "Комментарий": cat_df["comment"].fillna("").astype(str),
-            }).reset_index(drop=True)
+            amount_color = "#c0392b" if kind == "expense" else "#1a8f3a"
+            border_color = "#2563eb" if is_open else "#e5e7eb"
+            bg_color = "#eff6ff" if is_open else "#ffffff"
 
-            st.dataframe(view, use_container_width=True, hide_index=True)
+            with cols[i]:
+                # Плашка-карточка (HTML) + невидимая кнопка поверх
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{bg_color};
+                        border:2px solid {border_color};
+                        border-radius:10px;
+                        padding:10px 12px;
+                        text-align:center;
+                        min-height:85px;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:space-between;
+                        margin-bottom:6px;
+                    ">
+                        <div style="font-size:14px; font-weight:600; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{cat_name}</div>
+                        <div style="font-size:16px; font-weight:700; color:{amount_color};">{sign}{fmt_money(amount)} ₽</div>
+                        <div style="font-size:12px; color:#888;">{share:.0f}%</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Кнопка, растянутая поверх плашки
+                if st.button(
+                    " ",  # пустая метка
+                    key=f"card_{kind}_{month_key}_{cat_name}",
+                    use_container_width=True,
+                    help=f"Показать операции: {cat_name}"
+                ):
+                    if is_open:
+                        st.session_state[open_key] = None
+                    else:
+                        st.session_state[open_key] = cat_name
+                    st.rerun()
+
+    # Если какая-то категория открыта — показываем её операции
+    opened = st.session_state[open_key]
+    if opened:
+        cat_df = df_type[df_type["category"] == opened].copy()
+        cat_df["_date_obj"] = pd.to_datetime(cat_df["date"], errors="coerce")
+        cat_df = cat_df.dropna(subset=["_date_obj"]).sort_values("_date_obj", ascending=False)
+
+        sign = "−" if kind == "expense" else "+"
+        view = pd.DataFrame({
+            "Дата": cat_df["_date_obj"].apply(lambda d: d.strftime("%d.%m.%Y")),
+            "Сумма": cat_df["amount"].apply(lambda x: f"{sign}{fmt_money(x)} ₽"),
+            "Описание": cat_df["description"].fillna("").astype(str),
+            "Комментарий": cat_df["comment"].fillna("").astype(str),
+        }).reset_index(drop=True)
+
+        st.markdown(f"**{opened}** — операции:")
+        st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 def render_month_blocks(df):
-    """По месяцам → метрики → категории расходов и доходов → дни."""
     if df.empty:
         st.info("Нет операций.")
         return
@@ -435,20 +418,17 @@ def render_month_blocks(df):
 
             st.divider()
 
-            # РАСХОДЫ по категориям
             expense_df = df_m[df_m["type"] == "expense"].copy()
             if not expense_df.empty:
-                render_category_breakdown(expense_df, "expense", month_key)
+                render_category_cards(expense_df, "expense", month_key)
 
-            # ДОХОДЫ по категориям
             income_df = df_m[df_m["type"] == "income"].copy()
             if not income_df.empty:
-                st.markdown("")  # отступ
-                render_category_breakdown(income_df, "income", month_key)
+                st.markdown("")
+                render_category_cards(income_df, "income", month_key)
 
             st.divider()
 
-            # Таблицы по дням
             df_m["_date_obj"] = pd.to_datetime(df_m["date"], errors="coerce")
             unique_dates = sorted(df_m["_date_obj"].dropna().unique(), reverse=True)
 
@@ -539,6 +519,21 @@ st.markdown("""
     }
     .acc-name { font-size: 14px; color: #666; }
     .acc-balance { font-size: 22px; font-weight: 700; color: #111; }
+
+    /* Стили для кнопок-плашек категорий */
+    div[data-testid="stButton"] > button[kind="secondary"] {
+        background: transparent !important;
+        border: none !important;
+        color: transparent !important;
+        padding: 0 !important;
+        margin-top: -90px !important;  /* накладываем поверх карточки */
+        height: 85px !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stButton"] > button[kind="secondary"]:hover {
+        background: rgba(37, 99, 235, 0.08) !important;
+        border-radius: 10px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
