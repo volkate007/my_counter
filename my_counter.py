@@ -12,9 +12,8 @@ DESIRED_CATEGORIES = [
     ("Еда",         "expense", "мак,унифуд,столовая,теремок,кфс,бургеркинг"),
     ("Транспорт",   "expense", "проездной,тройка,стрелка,метро,автобус"),
     ("Спорт",       "expense", "соревнования,семинар,аттестация,членский взнос,тренировки"),
-    ("В долг",       "expense", "долг,в долг"),
     ("Зарплата",    "income",  "100б,судейство,зарплата,аванс,зп"),
-    ("Переводы",    "income",  "перевод,подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
+    ("Переводы",    "income",  "подарок,от мамы,от папы,от бабушки,от дедушки,от кирилла,от бабушки л."),
     ("Другое",      "both",    ""),
 ]
 
@@ -342,7 +341,56 @@ def render_month_blocks(df):
                 help="Выбери одну или несколько категорий — покажутся только они. Пусто — все."
             )
 
-            # Фильтруем
+            # ---- Итоговая сумма по выбранным категориям ----
+            if selected_cats:
+                sel_df = df_m[df_m["category"].isin(selected_cats)].copy()
+
+                sel_income = sel_df.loc[sel_df["type"] == "income", "amount"].sum()
+                sel_expense = sel_df.loc[sel_df["type"] == "expense", "amount"].sum()
+
+                if len(selected_cats) == 1:
+                    label_line = selected_cats[0]
+                else:
+                    label_line = f"Выбрано: {len(selected_cats)} категории"
+
+                lines = []
+                if sel_expense > 0:
+                    lines.append(
+                        f"<span style='color:#c0392b; font-weight:700; font-size:18px'>"
+                        f"−{fmt_money(sel_expense)} ₽</span>"
+                    )
+                if sel_income > 0:
+                    lines.append(
+                        f"<span style='color:#1a8f3a; font-weight:700; font-size:18px'>"
+                        f"+{fmt_money(sel_income)} ₽</span>"
+                    )
+
+                if lines:
+                    sums_html = "&nbsp;&nbsp;&nbsp;".join(lines)
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#f8fafc;
+                            border:1px solid #e5e7eb;
+                            border-radius:8px;
+                            padding:8px 12px;
+                            margin:6px 0;
+                            display:flex;
+                            justify-content:space-between;
+                            align-items:center;
+                            flex-wrap:wrap;
+                            gap:6px;
+                        ">
+                            <span style="color:#333; font-size:14px; font-weight:600;">
+                                {label_line}
+                            </span>
+                            <span>{sums_html}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+            # Фильтруем для таблиц
             if selected_cats:
                 df_filtered = df_m[df_m["category"].isin(selected_cats)].copy()
             else:
