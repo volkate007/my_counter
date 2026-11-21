@@ -1,4 +1,4 @@
-зп,eamlit as st
+import eamlit as st
 import pandas as pd
 from datetime import date
 from streamlit_gsheets import GSheetsConnection
